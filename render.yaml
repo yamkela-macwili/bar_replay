@@ -1,0 +1,39 @@
+services:
+  # Main API service
+  - type: web
+    name: pyreplay-api
+    runtime: python
+    pythonVersion: 3.11
+    
+    # Build and startup commands
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn -c gunicorn.conf.py app:app"
+    
+    # Health check
+    healthCheckPath: /health
+    
+    # Instance settings
+    plan: standard
+    numInstances: 1
+    
+    # Environment variables (set these in Render dashboard)
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: FLASK_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SECRET_KEY
+        # Set in Render dashboard - MUST be >= 32 characters
+        scope: secret
+      - key: REDIS_URL
+        # Set to your managed Redis (Upstash recommended)
+        # Format: redis://default:password@hostname:port
+        scope: secret
+  
+  # Redis service (optional: use Upstash managed Redis instead)
+  # - type: redis
+  #   name: pyreplay-redis
+  #   ipWhitelist: []
+  #   plan: starter
