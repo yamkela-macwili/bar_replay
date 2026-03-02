@@ -181,14 +181,21 @@ class YFinanceDataProvider(DataProvider):
 
             # Determine if we need to download more
             needs_download = False
+            now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+            
             if df.empty:
                 needs_download = True
             elif not before: # Check if we need latest (1h heuristic)
                 last_dt = df["datetime"].max()
-                if (datetime.datetime.now() - last_dt.to_pydatetime().replace(tzinfo=None)).total_seconds() > 3600:
+                # Use now_utc for comparison to match tz-naive UTC stored in parquet
+                if (now_utc - last_dt).total_seconds() > 3600:
                     needs_download = True
             
             if needs_download:
+                # Extra guard: if last_dt is somehow after now_utc, don't request from yfinance
+                if not df.empty and df["datetime"].max() >= now_utc:
+                    print(f"ℹ️ Cache for {symbol} is already up-to-date or ahead ({df['datetime'].max()}). Skipping download.")
+                    needs_download = False
                 print(f"📡 Downloading {yf_symbol} ({interval}) from yfinance...")
                 ticker = yf.Ticker(yf_symbol)
                 try:

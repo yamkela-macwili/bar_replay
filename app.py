@@ -20,17 +20,33 @@ def ensure_session():
 
 def get_system():
     """Retrieve the current user's ReplaySystem from the store."""
-    return store.get(session.get("session_id"))
+    sid = session.get("session_id")
+    # Fallback to request indices if session cookie is missing/empty
+    if not sid:
+        if request.is_json:
+            sid = request.json.get("session_id")
+        else:
+            sid = request.args.get("session_id")
+            
+    if not sid:
+        return None
+        
+    return store.get(sid)
 
 def save_system(system):
     """Save the current user's ReplaySystem back to the store."""
-    if system and "session_id" in session:
-        store.set(session["session_id"], system)
+    if system and system.session_id:
+        store.set(system.session_id, system)
 
-def init_engines(symbol="EURUSD", timeframe="H1", provider="csv"):
+def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=None):
     """Initialize or re-initialize the replay and execution engines."""
     from backend.engine_system import EngineFactory
-    new_system = EngineFactory.create(symbol, timeframe, provider)
+    
+    # Use provided ID, or fallback to current session
+    if not session_id:
+        session_id = session.get("session_id")
+        
+    new_system = EngineFactory.create(symbol, timeframe, provider, session_id=session_id)
     save_system(new_system)
     return new_system
 
@@ -51,9 +67,10 @@ def api_load():
     symbol = data.get("symbol", "EURUSD")
     timeframe = data.get("timeframe", "H1")
     provider = data.get("provider", "csv")
+    session_id = data.get("session_id") # Explicit ID from frontend
 
     try:
-        system = init_engines(symbol, timeframe, provider)
+        system = init_engines(symbol, timeframe, provider, session_id=session_id)
         return jsonify({
             "status": "ok",
             "symbol": symbol,

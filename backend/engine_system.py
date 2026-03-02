@@ -9,8 +9,8 @@ from backend.indicators import compute_indicators
 class ReplaySystem:
     """Isolated container for all trading engines in a single session."""
     
-    def __init__(self, data, symbol, timeframe, provider):
-        self.session_id = str(uuid.uuid4())[:8]
+    def __init__(self, data, symbol, timeframe, provider, session_id=None):
+        self.session_id = session_id or str(uuid.uuid4())[:8]
         self.symbol = symbol
         self.timeframe = timeframe
         self.provider = provider
@@ -55,7 +55,7 @@ class EngineFactory:
     """Factory for creating fresh ReplaySystem instances."""
     
     @staticmethod
-    def create(symbol, timeframe, provider):
+    def create(symbol, timeframe, provider, session_id=None):
         """Create a new ReplaySystem with fresh data and engines."""
         from backend import data_module
         
@@ -66,4 +66,4 @@ class EngineFactory:
         if df.empty:
             raise ValueError(f"No data found for {symbol} {timeframe}")
             
-        return ReplaySystem(df, symbol, timeframe, provider)
+        return ReplaySystem(df, symbol, timeframe, provider, session_id=session_id)

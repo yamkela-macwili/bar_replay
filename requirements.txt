@@ -8,3 +8,4 @@ portalocker>=2.8
 pyarrow>=15.0
 yfinance>=0.2
 python-dotenv>=1.0
+fakeredis>=2.20
