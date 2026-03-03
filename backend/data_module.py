@@ -203,7 +203,25 @@ class YFinanceDataProvider(DataProvider):
             os.makedirs(config.CACHE_DIR, exist_ok=True)
 
     def _get_cache_path(self, symbol, timeframe):
-        return os.path.join(config.CACHE_DIR, f"{symbol}_{timeframe}.parquet")
+        """Return a cache path.
+
+        This tries to be tolerant of existing cache files that may have been
+        written using either the UI symbol (e.g. "EURUSD") or the yfinance
+        symbol (e.g. "EURUSD=X"). If an existing file is found, return that
+        path. Otherwise prefer the yfinance-based name for new downloads.
+        """
+        yf_symbol = config.SYMBOL_MAP.get(symbol, symbol)
+        candidate_ui = os.path.join(config.CACHE_DIR, f"{symbol}_{timeframe}.parquet")
+        candidate_yf = os.path.join(config.CACHE_DIR, f"{yf_symbol}_{timeframe}.parquet")
+
+        # Prefer an existing cache file to avoid unnecessary downloads
+        if os.path.exists(candidate_ui):
+            return candidate_ui
+        if os.path.exists(candidate_yf):
+            return candidate_yf
+
+        # Default to using the yfinance symbol when creating a new cache
+        return candidate_yf
 
     def fetch_bars(self, symbol, timeframe, count, before=None):
         import pandas as pd
@@ -292,39 +310,157 @@ class YFinanceDataProvider(DataProvider):
                 print(f"📡 Downloading {yf_symbol} ({interval}) from yfinance...")
                 ticker = yf.Ticker(yf_symbol)
                 try:
-                    if df.empty:
-                        # Initial migration to yfinance / new cache
-                        new_df = ticker.history(period="max", interval=interval)
-                    else:
-                        # Appending new data
-                        last_dt = df["datetime"].max()
-                        new_df = ticker.history(start=last_dt, interval=interval)
-                    
-                    if not new_df.empty:
-                        new_df = new_df.reset_index()
-                        # handle both 'Date' and 'Datetime' index names
-                        time_col = "Date" if "Date" in new_df.columns else "Datetime"
-                        new_df = new_df.rename(columns={
-                            time_col: "datetime",
-                            "Open": "open", "High": "high", "Low": "low", 
-                            "Close": "close", "Volume": "volume"
-                        })
-                        new_df = new_df[["datetime", "open", "high", "low", "close", "volume"]]
-                        new_df["datetime"] = pd.to_datetime(new_df["datetime"], utc=True).dt.tz_localize(None)
-                        
+                    # Try a sequence of intervals: preferred interval first,
+                    # then fallbacks. This helps when Yahoo doesn't provide
+                    # data for larger intervals like 4h for some tickers.
+                    alt_intervals = {
+                        'H4': ['1h', '30m'],
+                        'H1': ['30m', '15m'],
+                        'D1': ['1h'],
+                    }
+
+                    attempt_intervals = [interval]
+                    attempt_intervals += alt_intervals.get(timeframe.upper(), [])
+
+                    new_df = None
+                    for itv in attempt_intervals:
+                        try:
+                            if df.empty:
+                                cand = ticker.history(period='max', interval=itv)
+                            else:
+                                last_dt = df['datetime'].max()
+                                cand = ticker.history(start=last_dt, interval=itv)
+                        except Exception as e:
+                            print(f"⚠️ yfinance.history error for {yf_symbol} interval {itv}: {e}")
+                            cand = None
+
+                        if cand is None or getattr(cand, 'empty', True):
+                            # try next interval
+                            continue
+
+                        # Normalize to DataFrame with datetime column
+                        try:
+                            cand = cand.reset_index()
+                        except Exception:
+                            pass
+
+                        time_col = 'Date' if 'Date' in getattr(cand, 'columns', []) else (
+                            'Datetime' if 'Datetime' in getattr(cand, 'columns', []) else 'datetime')
+
+                        # rename columns to expected names if present
+                        rename_map = {}
+                        if time_col in getattr(cand, 'columns', []):
+                            rename_map[time_col] = 'datetime'
+                        for k in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                            if k in getattr(cand, 'columns', []):
+                                rename_map[k] = k.lower()
+
+                        if rename_map:
+                            cand = cand.rename(columns=rename_map)
+
+                        # Ensure required columns exist
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            if col not in cand.columns:
+                                cand[col] = None
+
+                        if 'datetime' in cand.columns:
+                            cand['datetime'] = pd.to_datetime(cand['datetime'], utc=True).dt.tz_localize(None)
+
+                        # If fetched interval is finer than desired (e.g., we fetched 1h for H4), resample
+                        if itv != interval and timeframe.upper() in ['H4', 'D1']:
+                            try:
+                                cand = resample_timeframe(cand[['datetime','open','high','low','close','volume']], timeframe.upper())
+                            except Exception as e:
+                                print(f"⚠️ Resample failed for {symbol} from {itv} to {timeframe}: {e}")
+
+                        new_df = cand
+                        # stop at first successful fetch
+                        break
+
+                    if new_df is not None and not getattr(new_df, 'empty', True):
+                        # align columns
+                        new_df = new_df[['datetime','open','high','low','close','volume']]
+
                         if df.empty:
                             df = new_df
                         else:
                             df = pd.concat([df, new_df])
-                        
-                        # Deduplicate and sort
-                        df = df.drop_duplicates(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-                        
-                        # Atomic write
-                        df.to_parquet(cache_path)
-                        print(f"✅ Cache updated for {symbol} ({len(df)} total bars)")
+
+                        df = df.drop_duplicates(subset=['datetime']).sort_values('datetime').reset_index(drop=True)
+
+                        try:
+                            df.to_parquet(cache_path)
+                            print(f"✅ Cache updated for {symbol} ({len(df)} total bars)")
+                        except Exception as e:
+                            print(f"⚠️ Failed to write cache for {symbol}: {e}")
                 except Exception as e:
                     print(f"❌ YFinance download failed for {symbol}: {e}")
+
+            # final fallback: if df is still empty, try reading existing cache again or CSV fallback
+            if df.empty:
+                # try reading cache without lock
+                if os.path.exists(cache_path):
+                    try:
+                        df = pd.read_parquet(cache_path)
+                    except Exception:
+                        df = pd.DataFrame()
+
+            # If still empty, try resampling from a finer cached timeframe (e.g. H1 -> H4)
+            if df.empty:
+                try:
+                    tf_minutes = { 'M1':1, 'M5':5, 'M15':15, 'H1':60, 'H4':240, 'D1':1440 }
+                    target_min = tf_minutes.get(timeframe.upper())
+                    if target_min is not None:
+                        candidates = []
+                        for f in os.listdir(config.CACHE_DIR):
+                            if not f.startswith(f"{symbol}_") or not f.endswith('.parquet'):
+                                continue
+                            parts = f.replace('.parquet','').split('_')
+                            if len(parts) != 2:
+                                continue
+                            cand_tf = parts[1]
+                            cand_min = tf_minutes.get(cand_tf.upper())
+                            if cand_min and cand_min < target_min:
+                                candidates.append((cand_min, cand_tf, os.path.join(config.CACHE_DIR, f)))
+
+                        # pick the finest available (smallest minutes)
+                        if candidates:
+                            candidates.sort()
+                            cand_min, cand_tf, cand_path = candidates[0]
+                            try:
+                                base_df = pd.read_parquet(cand_path)
+                                # ensure datetime index column
+                                if 'datetime' not in base_df.columns and base_df.index.name in (None, 'datetime'):
+                                    base_df = base_df.reset_index()
+                                resampled = resample_timeframe(base_df[['datetime','open','high','low','close','volume']], timeframe.upper())
+                                df = resampled
+                                try:
+                                    df.to_parquet(cache_path)
+                                    print(f"ℹ️ Resampled {symbol} {cand_tf} -> {timeframe} and cached to {cache_path}")
+                                except Exception as e:
+                                    print(f"⚠️ Failed to write resampled cache for {symbol}: {e}")
+                            except Exception as e:
+                                print(f"⚠️ Resample fallback failed for {symbol} from {cand_tf}: {e}")
+                except Exception:
+                    pass
+
+            if df.empty:
+                # last resort: try CSV provider fallback
+                try:
+                    from .data_module import CSVDataProvider
+                except Exception:
+                    try:
+                        # relative import fallback
+                        from backend.data_module import CSVDataProvider
+                    except Exception:
+                        CSVDataProvider = None
+
+                if CSVDataProvider:
+                    try:
+                        csvprov = CSVDataProvider()
+                        df = csvprov.fetch_bars(symbol, timeframe, count, before=before)
+                    except Exception:
+                        pass
 
         if df.empty:
             return pd.DataFrame()

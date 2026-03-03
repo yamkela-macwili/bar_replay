@@ -32,14 +32,9 @@
             <div class="control-item">
                 <label for="symbolSelect">Symbol</label>
                 <select id="symbolSelect">
-                    <option value="EURUSD" selected>EURUSD</option>
-                    <option value="GBPUSD">GBPUSD</option>
-                    <option value="USDJPY">USDJPY</option>
-                    <option value="AUDUSD">AUDUSD</option>
-                    <option value="USDCAD">USDCAD</option>
-                    <option value="XAUUSD">XAUUSD</option>
-                    <option value="BTCUSD">BTCUSD</option>
-                    <option value="USD_INDEX">USD Index</option>
+                    {% for s, tf in symbols %}
+                        <option value="{{ s }}" {% if s == 'EURUSD' %}selected{% endif %}>{{ s.replace('_', ' ') }}</option>
+                    {% endfor %}
                 </select>
             </div>
             <div class="control-item">

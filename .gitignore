@@ -26,3 +26,5 @@ Thumbs.db
 # Project
 *.log
 .env
+
+TODO.md

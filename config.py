@@ -3,7 +3,8 @@
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data", "sample")
+# Point DATA_DIR at the repository `data/` folder (samples live here in this repo)
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 # Trading defaults
 INITIAL_BALANCE = 10000.0
@@ -35,8 +36,10 @@ SYMBOL_MAP = {
     "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X",
     "USDCAD": "USDCAD=X",
-    "XAUUSD": "GC=F",
+    "XAUUSD": "XAUUSD=X",
     "BTCUSD": "BTC-USD",
+    "USDCHF": "USDCHF=X",
+    "NZDUSD": "NZDUSD=X",
     "USD_INDEX": "DX-Y.NYB"
 }
 

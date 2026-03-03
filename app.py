@@ -1,7 +1,15 @@
 """PyReplay Trader — Flask application entry point."""
 
-from flask import Flask, render_template, jsonify, request, session
+# Ensure the project root is on sys.path so `import config` works when the
+# app is executed as a script from different working directories or by
+# gunicorn. This is a minimal, safe change that doesn't alter behavior.
 import os
+import sys
+repo_root = os.path.dirname(os.path.abspath(__file__))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from flask import Flask, render_template, jsonify, request, session
 import pandas as pd
 import uuid
 
