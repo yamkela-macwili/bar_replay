@@ -46,6 +46,12 @@ def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=Non
     if not session_id:
         session_id = session.get("session_id")
         
+    # Only allow safe/cache-backed providers for the chart UI. Reject or
+    # coerce legacy/local providers to the cache-backed yfinance provider.
+    allowed_providers = {"yfinance"}
+    if provider not in allowed_providers:
+        provider = "yfinance"
+
     new_system = EngineFactory.create(symbol, timeframe, provider, session_id=session_id)
     save_system(new_system)
     return new_system
@@ -54,8 +60,8 @@ def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=Non
 @app.route("/")
 def index():
     """Serve the main application page."""
-    # Symbols from CSV provider for the initial list
-    symbols = data_module.get_available_symbols("csv")
+    # Use yfinance/cache-backed symbols for the UI — hide CSV/MT5 choices
+    symbols = data_module.get_available_symbols("yfinance")
     return render_template("index.html", symbols=symbols)
 
 

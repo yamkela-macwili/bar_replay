@@ -42,17 +42,53 @@ class DataProvider(ABC):
 
 class CSVDataProvider(DataProvider):
     """Data provider that loads from local CSV files."""
-    
-    def fetch_bars(self, symbol, timeframe, count, before=None):
-        import pandas as pd
-        filename = f"{symbol}_{timeframe}.csv"
-        filepath = os.path.join(config.DATA_DIR, filename)
-        
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Data file not found: {filepath}")
+    def __init__(self):
+        # ensure cache dir exists for potential parquet lookups
+        if not os.path.exists(config.CACHE_DIR):
+            try:
+                os.makedirs(config.CACHE_DIR, exist_ok=True)
+            except Exception:
+                # best-effort; downstream will still work if CSVs exist
+                pass
 
-        df = pd.read_csv(filepath)
-        df["datetime"] = pd.to_datetime(df["datetime"])
+    def fetch_bars(self, symbol, timeframe, count, before=None):
+        """Try parquet cache first, then fall back to CSV files.
+
+        This makes local development work with parity to the yfinance
+        provider which writes parquet caches under `config.CACHE_DIR`.
+        """
+        import pandas as pd
+
+        # Prefer parquet cache when available (atomic writes guarded by a lock)
+        parquet_path = os.path.join(config.CACHE_DIR, f"{symbol}_{timeframe}.parquet")
+        lock_path = parquet_path + ".lock"
+
+        df = pd.DataFrame()
+        # attempt to read parquet under lock
+        try:
+            # use portalocker to avoid race with writers
+            with portalocker.Lock(lock_path, timeout=5):
+                if os.path.exists(parquet_path):
+                    try:
+                        df = pd.read_parquet(parquet_path)
+                    except Exception as e:
+                        print(f"⚠️ Parquet read failed for {symbol}_{timeframe}: {e}. Falling back to CSV.")
+        except Exception:
+            # lock acquisition failed or other issue - continue to try CSV
+            df = pd.DataFrame()
+
+        # If parquet cache didn't yield results, fall back to CSV in DATA_DIR
+        if df.empty:
+            csv_filename = f"{symbol}_{timeframe}.csv"
+            csv_path = os.path.join(config.DATA_DIR, csv_filename)
+            if not os.path.exists(csv_path):
+                raise FileNotFoundError(f"Data file not found in cache or samples: {parquet_path} / {csv_path}")
+
+            df = pd.read_csv(csv_path)
+            # Normalize datetime
+            df["datetime"] = pd.to_datetime(df["datetime"])
+
+        # ensure ordering
         df = df.sort_values("datetime")
 
         if before:
@@ -62,16 +98,33 @@ class CSVDataProvider(DataProvider):
         return df.tail(count).reset_index(drop=True)
 
     def get_available_symbols(self):
-        symbols = []
-        if not os.path.exists(config.DATA_DIR):
-            return symbols
+        """Return available (symbol, timeframe) tuples from both cache and sample dirs."""
+        seen = set()
+        results = []
 
-        for f in os.listdir(config.DATA_DIR):
-            if f.endswith(".csv"):
-                parts = f.replace(".csv", "").split("_")
-                if len(parts) == 2:
-                    symbols.append((parts[0], parts[1]))
-        return symbols
+        # look in cache dir for parquet files
+        if os.path.exists(config.CACHE_DIR):
+            for f in os.listdir(config.CACHE_DIR):
+                if f.endswith(".parquet"):
+                    parts = f.replace(".parquet", "").split("_")
+                    if len(parts) == 2:
+                        key = (parts[0], parts[1])
+                        if key not in seen:
+                            seen.add(key)
+                            results.append(key)
+
+        # look in data dir for csv samples (don't duplicate)
+        if os.path.exists(config.DATA_DIR):
+            for f in os.listdir(config.DATA_DIR):
+                if f.endswith(".csv"):
+                    parts = f.replace(".csv", "").split("_")
+                    if len(parts) == 2:
+                        key = (parts[0], parts[1])
+                        if key not in seen:
+                            seen.add(key)
+                            results.append(key)
+
+        return results
 
 
 class MT5DataProvider(DataProvider):
@@ -154,6 +207,46 @@ class YFinanceDataProvider(DataProvider):
 
     def fetch_bars(self, symbol, timeframe, count, before=None):
         import pandas as pd
+        # yfinance optionally imports `curl_cffi.requests` if curl_cffi is
+        # installed. In some environments curl_cffi imports eventlet which
+        # pulls in green socket wrappers that lack `sendmsg`, causing
+        # an AttributeError during import (see GreenSocket.sendmsg). To
+        # avoid that, pre-register a lightweight shim module named
+        # `curl_cffi` that exposes the standard `requests` API. This
+        # prevents yfinance from importing the real curl_cffi package.
+        try:
+            import sys, types
+            import requests as _real_requests
+            if 'curl_cffi' not in sys.modules:
+                # Create a requests-like shim that tolerates the
+                # `impersonate` kwarg used by yfinance when curl_cffi
+                # is present. We subclass the real requests.Session to
+                # accept and ignore that extra kwarg.
+                class _ShimSession(_real_requests.Session):
+                    def __init__(self, *args, **kwargs):
+                        kwargs.pop('impersonate', None)
+                        super().__init__(*args, **kwargs)
+
+                shim = types.ModuleType('curl_cffi')
+                shim.requests = types.ModuleType('curl_cffi.requests')
+                shim.requests.Session = _ShimSession
+                # expose top-level helpers
+                shim.requests.get = _real_requests.get
+                shim.requests.post = _real_requests.post
+                shim.requests.request = _real_requests.request
+                shim.requests.utils = getattr(_real_requests, 'utils', None)
+                shim.requests.Response = getattr(_real_requests, 'Response', None)
+                shim.requests.exceptions = getattr(_real_requests, 'exceptions', None)
+                shim.requests.adapters = getattr(_real_requests, 'adapters', None)
+                shim.requests.models = getattr(_real_requests, 'models', None)
+                # requests.sessions module contains the Session class reference
+                shim.requests.session = getattr(_real_requests, 'sessions', types.SimpleNamespace(Session=_ShimSession))
+                sys.modules['curl_cffi'] = shim
+        except Exception:
+            # If anything goes wrong here, fall back and let yfinance
+            # import proceed (it may raise the original error).
+            pass
+
         import yfinance as yf
         
         yf_symbol = config.SYMBOL_MAP.get(symbol, symbol)
