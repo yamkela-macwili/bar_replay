@@ -22,7 +22,7 @@ MAX_BARS_LIMIT = 3000       # Maximum number of bars to keep in RAM
 DEFAULT_TIMEFRAME = "4H"
 
 # Data paths
-CACHE_DIR = os.path.join(BASE_DIR, "data", "cache")
+CACHE_DIR = os.path.join(BASE_DIR, "notebooks", "market_cache")
 
 # Symbol Mappings (UI -> yfinance)
 # SYMBOL_MAP = {
