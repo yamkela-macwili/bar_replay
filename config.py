@@ -4,7 +4,7 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Point DATA_DIR at the repository `data/` folder (samples live here in this repo)
-DATA_DIR = os.path.join(BASE_DIR, "data")
+DATA_DIR = os.path.join(BASE_DIR, "notebooks")
 
 # Trading defaults
 INITIAL_BALANCE = 10000.0
@@ -59,3 +59,4 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-12345")
 HOST = "0.0.0.0"
 PORT = 5000
 DEBUG = True
+
