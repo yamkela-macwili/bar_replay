@@ -1,436 +1,426 @@
-"""PyReplay Trader — Flask application entry point."""
+"""Flask application entry point for PyReplay Trader.
 
-# Ensure the project root is on sys.path so `import config` works when the
-# app is executed as a script from different working directories or by
-# gunicorn. This is a minimal, safe change that doesn't alter behavior.
-import os
-import sys
-repo_root = os.path.dirname(os.path.abspath(__file__))
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
+Production-ready: stateless, multi-worker safe, Redis-backed.
+Deploy with: gunicorn -w 4 -k gthread app:app
+"""
 
 from flask import Flask, render_template, jsonify, request, session
-import pandas as pd
 import uuid
 
 import config
+from backend.logging_config import setup_logging, get_logger
+from backend.engine_store import EngineStore, DeserializationError, SerializationError
 from backend import data_module
-from backend import engine_system
-from backend.engine_store import store
+from backend.services import (
+    ReplayService,
+    TradeService,
+    IndicatorService,
+    DataService,
+)
 
+# Initialize logging
+logger = setup_logging(__name__)
+
+# Create Flask app
 app = Flask(__name__)
-app.secret_key = config.SECRET_KEY
+
+# Flask configuration
+app.config.update(
+    SECRET_KEY=config.SECRET_KEY,
+    DEBUG=config.DEBUG,
+    TESTING=config.TESTING,
+    SESSION_COOKIE_SECURE=config.SESSION_COOKIE_SECURE,
+    SESSION_COOKIE_HTTPONLY=config.SESSION_COOKIE_HTTPONLY,
+    SESSION_COOKIE_SAMESITE=config.SESSION_COOKIE_SAMESITE,
+    SESSION_COOKIE_NAME=config.SESSION_COOKIE_NAME,
+    PERMANENT_SESSION_LIFETIME=config.PERMANENT_SESSION_LIFETIME,
+)
+
+app.permanent_session_lifetime = config.PERMANENT_SESSION_LIFETIME
+
+# Initialize EngineStore
+try:
+    engine_store = EngineStore(config.REDIS_URL)
+    logger.info("EngineStore initialized")
+except Exception as e:
+    logger.error(f"Failed to initialize EngineStore: {e}")
+    raise RuntimeError("Cannot start without storage backend") from e
+
+
+# Session management
 
 @app.before_request
-def ensure_session():
+def initialize_session():
+    """Ensure session UUID exists."""
+    session.permanent = True
     if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
+        session_id = str(uuid.uuid4())
+        session["session_id"] = session_id
+        logger.info(f"Created session: {session_id}")
 
-def get_system():
-    """Retrieve the current user's ReplaySystem from the store."""
+
+def get_session_id():
+    """Get or validate session UUID."""
     sid = session.get("session_id")
-    # Fallback to request indices if session cookie is missing/empty
-    if not sid:
-        if request.is_json:
-            sid = request.json.get("session_id")
-        else:
-            sid = request.args.get("session_id")
-            
-    if not sid:
-        return None
-        
-    return store.get(sid)
+    if not sid or not isinstance(sid, str) or len(sid) != 36:
+        raise ValueError("Invalid session")
+    return sid
+
+
+def load_system():
+    """Load ReplaySystem from storage."""
+    sid = get_session_id()
+    system = engine_store.get(sid)
+    if system:
+        logger.debug(f"Loaded system for {sid}")
+    return system
+
 
 def save_system(system):
-    """Save the current user's ReplaySystem back to the store."""
-    if system and system.session_id:
-        store.set(system.session_id, system)
-
-def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=None):
-    """Initialize or re-initialize the replay and execution engines."""
-    from backend.engine_system import EngineFactory
-    
-    # Use provided ID, or fallback to current session
-    if not session_id:
-        session_id = session.get("session_id")
-        
-    # Only allow safe/cache-backed providers for the chart UI. Reject or
-    # coerce legacy/local providers to the cache-backed yfinance provider.
-    allowed_providers = {"yfinance"}
-    if provider not in allowed_providers:
-        provider = "yfinance"
-
-    new_system = EngineFactory.create(symbol, timeframe, provider, session_id=session_id)
-    save_system(new_system)
-    return new_system
-
-# ── Pages ─────────────────────────────────────────────────────
-@app.route("/")
-def index():
-    """Serve the main application page."""
-    # Use yfinance/cache-backed symbols for the UI — hide CSV/MT5 choices
-    symbols = data_module.get_available_symbols("yfinance")
-    return render_template("index.html", symbols=symbols)
+    """Atomically save ReplaySystem."""
+    sid = get_session_id()
+    engine_store.set(sid, system)
+    logger.debug(f"Saved system for {sid}")
 
 
-# ── Data API ──────────────────────────────────────────────────
-@app.route("/api/load", methods=["POST"])
-def api_load():
-    """Load a symbol and timeframe into the replay engine."""
-    data = request.get_json(force=True)
-    symbol = data.get("symbol", "EURUSD")
-    timeframe = data.get("timeframe", "H1")
-    provider = data.get("provider", "csv")
-    session_id = data.get("session_id") # Explicit ID from frontend
+# Error handlers
 
-    try:
-        system = init_engines(symbol, timeframe, provider, session_id=session_id)
-        return jsonify({
-            "status": "ok",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "total_bars": system.replay_engine.total_bars,
-            "start_index": system.replay_engine.current_index,
-            "visible_count": config.INITIAL_BAR_COUNT,
-            "session_id": system.session_id
-        })
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 400
+@app.errorhandler(ValueError)
+def handle_value_error(error):
+    """Handle validation errors."""
+    logger.warning(f"Validation error: {error}")
+    return jsonify({"status": "error", "message": str(error)}), 400
 
 
-@app.route("/api/data", methods=["GET"])
-def api_data():
-    """Get visible chart data and computed indicators."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
-
-    visible = system.replay_engine.get_visible_data(max_bars=config.INITIAL_BAR_COUNT)
-    bars = visible["bars"]
-    indicators_data = visible["indicators"]
-
-    # Check SL/TP on current bar
-    if system.execution_engine and len(system.execution_engine.open_positions) > 0:
-        current_bar = system.replay_engine.get_current_bar()
-        system.execution_engine.check_sl_tp(current_bar)
-        save_system(system)
-
-    current_price = float(bars.iloc[-1]["close"])
-
+@app.errorhandler(DeserializationError)
+def handle_deserialization_error(error):
+    """Handle corrupted session."""
+    logger.error(f"Deserialization error: {error}")
     return jsonify({
-        "status": "ok",
-        "bars": {
-            "datetime": bars["datetime"].astype(str).tolist(),
-            "open": bars["open"].tolist(),
-            "high": bars["high"].tolist(),
-            "low": bars["low"].tolist(),
-            "close": bars["close"].tolist(),
-            "volume": bars["volume"].tolist(),
-        },
-        "indicators": indicators_data,
-        "progress": system.replay_engine.get_progress(),
-        "account": system.execution_engine.get_account_state(current_price),
-        "open_positions": system.execution_engine.get_open_positions(),
-        "trade_history": system.execution_engine.get_trade_history(),
-        "session_id": system.session_id
-    })
+        "status": "error",
+        "message": "Session corrupted. Please refresh."
+    }), 410
+
+
+@app.errorhandler(SerializationError)
+def handle_serialization_error(error):
+    """Handle serialization failures."""
+    logger.error(f"Serialization error: {error}")
+    return jsonify({
+        "status": "error",
+        "message": "Cannot save state. Try again."
+    }), 500
+
+
+@app.errorhandler(500)
+def handle_internal_error(error):
+    """Handle unexpected errors."""
+    logger.error(f"Internal error: {error}", exc_info=True)
+    return jsonify({
+        "status": "error",
+        "message": "Internal server error."
+    }), 500
+
+
+# Health & Status
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check for Render."""
+    health = {
+        "status": "healthy",
+        "storage": engine_store.health_check(),
+    }
+    return jsonify(health), 200
 
 
 @app.route("/api/session", methods=["GET"])
 def api_session():
-    """Bootstrap a session for the client."""
-    return jsonify({
-        "status": "ok",
-        "session_id": session.get("session_id")
-    })
+    """Get session UUID."""
+    try:
+        sid = get_session_id()
+        return jsonify({"status": "ok", "session_id": sid}), 200
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+# Pages
+
+@app.route("/")
+def index():
+    """Serve main page."""
+    symbols = DataService.get_available_symbols("csv")
+    return render_template("index.html", symbols=symbols)
+
+
+# Data Loading
+
+@app.route("/api/load", methods=["POST"])
+def api_load():
+    """Load symbol and initialize replay."""
+    try:
+        data = request.get_json(force=True)
+        symbol = data.get("symbol", "EURUSD")
+        timeframe = data.get("timeframe", "H1")
+        provider = data.get("provider", "csv")
+        sid = get_session_id()
+
+        result = ReplayService.load_symbol(sid, symbol, timeframe, provider)
+
+        from backend.engine_system import EngineFactory
+        system = EngineFactory.create(symbol, timeframe, provider, session_id=sid)
+        save_system(system)
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Load failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/data", methods=["GET"])
+def api_data():
+    """Get chart data and indicators."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
+
+        result = ReplayService.get_visible_data(system)
+        save_system(system)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"api_data failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/data/load_more", methods=["GET"])
 def api_load_more():
-    """Fetch more bars for lazy loading (backward or forward)."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
-
-    direction = request.args.get("direction", "backward")
-    
+    """Lazy load bars."""
     try:
-        from backend import data_module
-        provider = data_module.get_provider(system.provider)
-        
-        if direction == "backward":
-            anchor_time = system.replay_engine.data["datetime"].min().isoformat()
-            new_data = provider.fetch_bars(
-                system.symbol, system.timeframe, 
-                count=config.LAZY_LOAD_COUNT, 
-                before=anchor_time
-            )
-            num_added = system.replay_engine.prepend_data(new_data)
-        else:
-            num_added = 0
-            
-        if num_added > 0:
-            system.refresh_indicators()
-            save_system(system)
-            
-        return jsonify({
-            "status": "ok",
-            "added": num_added,
-            "direction": direction,
-            "total_bars": system.replay_engine.total_bars,
-            "current_index": system.replay_engine.current_index,
-            "session_id": system.session_id
-        })
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
+
+        direction = request.args.get("direction", "backward")
+        result = ReplayService.load_more_bars(system, direction)
+        save_system(system)
+        return jsonify(result), 200
+
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Load more failed: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ── Replay Controls ──────────────────────────────────────────
+# Replay Controls
+
 @app.route("/api/step", methods=["POST"])
 def api_step():
-    """Step replay forward by one bar."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Step forward."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    success = system.replay_engine.step_forward()
+        result = ReplayService.step_forward(system)
+        save_system(system)
+        return jsonify(result), 200
 
-    # Check SL/TP on the new bar
-    if success and system.execution_engine:
-        current_bar = system.replay_engine.get_current_bar()
-        system.execution_engine.check_sl_tp(current_bar)
-    
-    save_system(system)
-
-    return jsonify({
-        "status": "ok" if success else "end",
-        "progress": system.replay_engine.get_progress(),
-    })
+    except Exception as e:
+        logger.error(f"Step failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/back", methods=["POST"])
 def api_back():
-    """Step replay backward by one bar."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Step backward."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    success = system.replay_engine.step_back()
-    save_system(system)
-    return jsonify({
-        "status": "ok" if success else "start",
-        "progress": system.replay_engine.get_progress(),
-    })
+        result = ReplayService.step_back(system)
+        save_system(system)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Back failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/play", methods=["POST"])
 def api_play():
     """Start auto-play."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    system.replay_engine.play()
-    save_system(system)
-    return jsonify({
-        "status": "ok",
-        "interval_ms": system.replay_engine.get_interval_ms(),
-        "progress": system.replay_engine.get_progress(),
-    })
+        result = ReplayService.play(system)
+        save_system(system)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Play failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/pause", methods=["POST"])
 def api_pause():
     """Pause auto-play."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    system.replay_engine.pause()
-    save_system(system)
-    return jsonify({
-        "status": "ok",
-        "progress": system.replay_engine.get_progress(),
-    })
+        result = ReplayService.pause(system)
+        save_system(system)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Pause failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/jump", methods=["POST"])
 def api_jump():
-    """Jump to a specific index or date."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Jump to index or date."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    data = request.get_json(force=True)
-    index = data.get("index")
-    date = data.get("date")
+        data = request.get_json(force=True)
+        index = data.get("index")
+        date = data.get("date")
 
-    if index is not None:
-        success = system.replay_engine.jump_to(int(index))
-    elif date:
-        success = system.replay_engine.jump_to_date(date)
-    else:
-        return jsonify({"status": "error", "message": "Provide index or date"}), 400
+        result = ReplayService.jump(system, index=index, date=date)
+        save_system(system)
+        return jsonify(result), 200
 
-    save_system(system)
-    return jsonify({
-        "status": "ok" if success else "error",
-        "progress": system.replay_engine.get_progress(),
-    })
+    except Exception as e:
+        logger.error(f"Jump failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/speed", methods=["POST"])
 def api_speed():
     """Set replay speed."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    data = request.get_json(force=True)
-    speed = int(data.get("speed", 1))
+        data = request.get_json(force=True)
+        speed = int(data.get("speed", 1))
 
-    success = system.replay_engine.set_speed(speed)
-    save_system(system)
-    return jsonify({
-        "status": "ok" if success else "error",
-        "speed": system.replay_engine.speed,
-        "interval_ms": system.replay_engine.get_interval_ms(),
-    })
+        result = ReplayService.set_speed(system, speed)
+        save_system(system)
+        return jsonify(result), 200
+
+    except Exception as e:
+        logger.error(f"Speed failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ── Trading API ───────────────────────────────────────────────
+# Trading
+
 @app.route("/api/trade", methods=["POST"])
 def api_trade():
-    """Execute a trading action (buy, sell, close, modify, close_all)."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Execute trade action."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    data = request.get_json(force=True)
-    action = data.get("action")
-    current_bar = system.replay_engine.get_current_bar()
-    current_price = float(current_bar["close"])
-    current_time = current_bar["datetime"]
+        data = request.get_json(force=True)
+        action = data.get("action")
 
-    if action in ("buy", "sell"):
-        lot_size = data.get("lot_size", config.DEFAULT_LOT_SIZE)
-        sl = data.get("sl")
-        tp = data.get("tp")
+        if action in ("buy", "sell"):
+            result = TradeService.open_position(
+                system,
+                direction=action,
+                lot_size=float(data.get("lot_size", config.DEFAULT_LOT_SIZE)),
+                sl=float(data.get("sl")) if data.get("sl") else None,
+                tp=float(data.get("tp")) if data.get("tp") else None,
+            )
+        elif action == "close":
+            result = TradeService.close_position(system, data.get("position_id"))
+        elif action == "close_all":
+            result = TradeService.close_all_positions(system)
+        elif action == "modify":
+            result = TradeService.modify_position(
+                system,
+                data.get("position_id"),
+                sl=float(data.get("sl")) if data.get("sl") else None,
+                tp=float(data.get("tp")) if data.get("tp") else None,
+            )
+        else:
+            return jsonify({"status": "error", "message": f"Unknown: {action}"}), 400
 
-        if sl is not None:
-            sl = float(sl)
-        if tp is not None:
-            tp = float(tp)
-
-        result = system.execution_engine.open_position(
-            direction=action,
-            lot_size=float(lot_size),
-            sl=sl,
-            tp=tp,
-            current_price=current_price,
-            current_time=current_time,
-        )
         save_system(system)
-        return jsonify({
-            "status": "ok" if result else "error",
-            "position": result,
-            "account": system.execution_engine.get_account_state(current_price),
-        })
+        return jsonify(result), 200
 
-    elif action == "close":
-        position_id = data.get("position_id")
-        result = system.execution_engine.close_position(
-            position_id, current_price, current_time
-        )
-        save_system(system)
-        return jsonify({
-            "status": "ok" if result else "error",
-            "position": result,
-            "account": system.execution_engine.get_account_state(current_price),
-        })
-
-    elif action == "close_all":
-        results = system.execution_engine.close_all_positions(current_price, current_time)
-        save_system(system)
-        return jsonify({
-            "status": "ok",
-            "closed": results,
-            "account": system.execution_engine.get_account_state(current_price),
-        })
-
-    elif action == "modify":
-        position_id = data.get("position_id")
-        sl = data.get("sl")
-        tp = data.get("tp")
-        if sl is not None:
-            sl = float(sl)
-        if tp is not None:
-            tp = float(tp)
-        result = system.execution_engine.modify_position(position_id, sl=sl, tp=tp)
-        save_system(system)
-        return jsonify({
-            "status": "ok" if result else "error",
-            "position": result,
-        })
-
-    return jsonify({"status": "error", "message": f"Unknown action: {action}"}), 400
+    except Exception as e:
+        logger.error(f"Trade failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ── Indicators API ────────────────────────────────────────────
+# Indicators
+
 @app.route("/api/indicators", methods=["POST"])
 def api_indicators():
-    """Toggle indicators on/off or update settings."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Manage indicators."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    data = request.get_json(force=True)
-    action = data.get("action", "toggle")
-    name = data.get("name")
-    settings = data.get("settings", {})
+        data = request.get_json(force=True)
+        action = data.get("action", "toggle")
+        name = data.get("name")
+        settings = data.get("settings", {})
 
-    if action == "toggle":
-        if name in system.active_indicators:
-            del system.active_indicators[name]
+        if action == "toggle":
+            result = IndicatorService.toggle_indicator(system, name, settings)
+        elif action == "set":
+            result = IndicatorService.set_indicator(system, name, settings)
+        elif action == "remove":
+            result = IndicatorService.remove_indicator(system, name)
+        elif action == "clear":
+            result = IndicatorService.clear_indicators(system)
         else:
-            system.active_indicators[name] = settings
-    elif action == "set":
-        system.active_indicators[name] = settings
-    elif action == "remove":
-        system.active_indicators.pop(name, None)
-    elif action == "clear":
-        system.active_indicators = {}
-    
-    system.refresh_indicators()
-    save_system(system)
+            return jsonify({"status": "error", "message": f"Unknown: {action}"}), 400
 
-    return jsonify({
-        "status": "ok",
-        "active_indicators": system.active_indicators,
-    })
+        save_system(system)
+        return jsonify(result), 200
 
+    except Exception as e:
+        logger.error(f"Indicator failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Stats
 
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
-    """Get account stats and trade history."""
-    system = get_system()
-    if system is None:
-        return jsonify({"status": "error", "message": "No data loaded"}), 400
+    """Get account stats."""
+    try:
+        system = load_system()
+        if system is None:
+            return jsonify({"status": "error", "message": "No data"}), 400
 
-    current_price = float(system.replay_engine.get_current_bar()["close"])
+        result = DataService.get_account_stats(system)
+        return jsonify(result), 200
 
-    return jsonify({
-        "status": "ok",
-        "account": system.execution_engine.get_account_state(current_price),
-        "open_positions": system.execution_engine.get_open_positions(),
-        "trade_history": system.execution_engine.get_trade_history(),
-    })
+    except Exception as e:
+        logger.error(f"Stats failed: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
-# ── Entry Point ───────────────────────────────────────────────
+# Startup
+
 if __name__ == "__main__":
+    logger.warning("Dev server. Use: gunicorn -w 4 -k gthread app:app")
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

@@ -1,20 +1,45 @@
+version: '3.9'
+
 services:
   redis:
     image: redis:7-alpine
+    container_name: pyreplay_redis
     ports:
       - "6379:6379"
-    restart: always
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
 
   api:
     build: .
+    container_name: pyreplay_api
     ports:
       - "5000:5000"
+    environment:
+      - ENVIRONMENT=development
+      - FLASK_ENV=development
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production-12345678
+      - LOG_LEVEL=DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - .:/app
       - ./data:/app/data
-    environment:
-      - FLASK_ENV=development
-      - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=dev-secret-key-replace-in-prod
-    depends_on:
-      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis_data:
+    driver: local
