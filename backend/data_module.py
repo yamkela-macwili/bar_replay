@@ -10,11 +10,9 @@ import time
 import config
 
 TIMEFRAME_MAP = {
-    "M1": "1min", "M5": "5min", "M15": "15min",
-    "H1": "1h", "H4": "4h", "D1": "1D"
+    "M5": "5min", "M15": "15min",
+    "H1": "1h", "H4": "4h"
 }
-
-MT5_TIMEFRAME_MAP = None # Lazy import
 
 class DataProvider(ABC):
     """Abstract base class for market data providers."""
@@ -74,73 +72,6 @@ class CSVDataProvider(DataProvider):
         return symbols
 
 
-class MT5DataProvider(DataProvider):
-    """Data provider using mt5linux (RPyC bridge to MT5)."""
-    
-    def __init__(self, host=None, port=None):
-        self.host = host or config.MT5_HOST
-        self.port = port or config.MT5_PORT
-        self.mt5 = None
-        
-    def _connect(self):
-        if self.mt5:
-            return True
-            
-        try:
-            from mt5linux import MetaTrader5
-            self.mt5 = MetaTrader5(self.host, self.port)
-            if not self.mt5.initialize():
-                print(f"MT5 initialize failed, error code = {self.mt5.last_error()}")
-                return False
-            return True
-        except Exception as e:
-            print(f"Failed to connect to MT5 bridge: {e}")
-            return False
-
-    def fetch_bars(self, symbol, timeframe, count, before=None):
-        import pandas as pd
-        if not self._connect():
-            raise ConnectionError("Could not connect to MT5")
-
-        # Map timeframe to MT5 constant
-        import mt5linux
-        tf_map = {
-            "M1": mt5linux.TIMEFRAME_M1,
-            "M5": mt5linux.TIMEFRAME_M5,
-            "M15": mt5linux.TIMEFRAME_M15,
-            "H1": mt5linux.TIMEFRAME_H1,
-            "H4": mt5linux.TIMEFRAME_H4,
-            "D1": mt5linux.TIMEFRAME_D1,
-        }
-        
-        mt5_tf = tf_map.get(timeframe)
-        if mt5_tf is None:
-            raise ValueError(f"Unsupported timeframe for MT5: {timeframe}")
-
-        if before:
-            # Fetch bars before specific time
-            before_dt = pd.to_datetime(before)
-            rates = self.mt5.copy_rates_from(symbol, mt5_tf, before_dt, count)
-        else:
-            # Fetch latest bars
-            rates = self.mt5.copy_rates_from_pos(symbol, mt5_tf, 0, count)
-
-        if rates is None or len(rates) == 0:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rates)
-        df['datetime'] = pd.to_datetime(df['time'], unit='s')
-        df = df[['datetime', 'open', 'high', 'low', 'close', 'tick_volume']]
-        df.columns = ['datetime', 'open', 'high', 'low', 'close', 'volume']
-        return df
-
-    def get_available_symbols(self):
-        if not self._connect():
-            return []
-        symbols = self.mt5.symbols_get()
-        return [(s.name, "H1") for s in symbols] if symbols else []
-
-
 class YFinanceDataProvider(DataProvider):
     """Data provider using yfinance with Parquet caching and symbol mapping."""
     
@@ -160,8 +91,8 @@ class YFinanceDataProvider(DataProvider):
         
         # yfinance timeframe mapping (flexible for case and format)
         yf_tf_map = {
-            "M1": "1m", "M5": "5m", "M15": "15m",
-            "H1": "1h", "H4": "4h", "D1": "1d",
+            "M5": "5m", "M15": "15m",
+            "H1": "1h", "H4": "4h", 
             "4H": "4h", "1H": "1h"
         }
         interval = yf_tf_map.get(timeframe.upper(), "1h")
@@ -249,9 +180,7 @@ class YFinanceDataProvider(DataProvider):
 
 
 def get_provider(provider_type="csv"):
-    if provider_type == "mt5":
-        return MT5DataProvider()
-    elif provider_type == "yfinance":
+    if provider_type == "yfinance":
         return YFinanceDataProvider()
     else:
         return CSVDataProvider()

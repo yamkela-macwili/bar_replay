@@ -26,3 +26,6 @@ Thumbs.db
 # Project
 *.log
 .env
+
+TODO.md
+.ipynb_checkpoints/

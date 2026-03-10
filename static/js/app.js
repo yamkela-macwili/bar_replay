@@ -464,7 +464,8 @@ function updateHistory(history) {
 // ── Controls Setup ────────────────────────────────────────
 function setupControls() {
     document.getElementById('loadBtn').addEventListener('click', async () => {
-        const provider = document.getElementById('providerSelect').value;
+        // const provider = document.getElementById('providerSelect').value;
+        const provider = 'yfinance'
         const symbol = document.getElementById('symbolSelect').value;
         const timeframe = document.getElementById('timeframeSelect').value;
 

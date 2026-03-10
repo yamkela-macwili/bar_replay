@@ -108,10 +108,11 @@ SYMBOL_MAP = {
     "GBPUSD": "GBPUSD=X",
     "USDJPY": "USDJPY=X",
     "AUDUSD": "AUDUSD=X",
-    "USDCAD": "USDCAD=X",
+    "USDCAD": "CAD=X",
+    "USDCHF": "CHF=X",
+    "NZDUSD": "NZDUSD=X",
     "XAUUSD": "GC=F",
-    "BTCUSD": "BTC-USD",
-    "USD_INDEX": "DX-Y.NYB"
+    "BTCUSD": "BTC-USD"
 }
 
 
