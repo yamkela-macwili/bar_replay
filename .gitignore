@@ -29,3 +29,7 @@ Thumbs.db
 
 TODO.md
 .ipynb_checkpoints/
+
+__pycache__/
+.pytest_cache/
+
