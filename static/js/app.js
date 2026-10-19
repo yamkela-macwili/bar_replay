@@ -14,6 +14,9 @@ let loadMoreTimer = null;
 let activeDrawingTool = '';
 let drawingPoints = [];
 let chartDrawings = [];
+let indicatorColors = JSON.parse(localStorage.getItem('pyreplay-indicator-colors') || '{}');
+let indicatorVisibility = JSON.parse(localStorage.getItem('pyreplay-indicator-visibility') || '{"rsi":true,"volumeProfile":false}');
+let volumeProfileBins = Number(localStorage.getItem('pyreplay-volume-profile-bins')) || 24;
 
 // ── Color Palette ─────────────────────────────────────────
 const COLORS = {
@@ -134,9 +137,77 @@ async function initChart() {
     });
 
     chart.on('plotly_click', (eventData) => {
-        if (!activeDrawingTool || !eventData.points?.length) return;
+        if (!eventData.points?.length) return;
+        const traceName = eventData.points[0].data?.name;
+        if (!activeDrawingTool && traceName && traceName !== 'Price') {
+            openIndicatorSettings(traceName);
+            return;
+        }
+        if (!activeDrawingTool) return;
         const point = eventData.points[0];
         addDrawingPoint({ x: point.x, y: Number(point.y) });
+    });
+}
+
+function openIndicatorSettings(traceName) {
+    const modal = document.getElementById('indicatorModal');
+    syncIndicatorModal();
+    const match = traceName.match(/^(SMA|EMA|RSI)\((\d+)\)$/);
+    const ids = { SMA: ['indSMA', 'smaPeriod'], EMA: ['indEMA', 'emaPeriod'], RSI: ['indRSI', 'rsiPeriod'] };
+    const kind = match?.[1];
+    if (kind) {
+        document.getElementById(ids[kind][0]).checked = true;
+        document.getElementById(ids[kind][1]).value = match[2];
+    } else if (traceName.startsWith('BB_')) {
+        document.getElementById('indBB').checked = true;
+    } else if (traceName.startsWith('MACD')) {
+        document.getElementById('indMACD').checked = true;
+    }
+    modal.classList.remove('hidden');
+    const row = kind ? document.getElementById(ids[kind][0]).closest('.indicator-item') : null;
+    row?.classList.add('indicator-item-focused');
+    setTimeout(() => row?.classList.remove('indicator-item-focused'), 1200);
+}
+
+function syncIndicatorModal() {
+    const names = Object.keys(currentData?.indicators || {});
+    const matchPeriod = prefix => names.find(name => name.startsWith(prefix + '('))?.match(/\((\d+)\)/)?.[1];
+    document.getElementById('indSMA').checked = Boolean(matchPeriod('SMA'));
+    document.getElementById('indEMA').checked = Boolean(matchPeriod('EMA'));
+    document.getElementById('indRSI').checked = Boolean(matchPeriod('RSI'));
+    document.getElementById('indMACD').checked = names.some(name => name.startsWith('MACD'));
+    document.getElementById('indBB').checked = names.some(name => name.startsWith('BB_'));
+    document.getElementById('smaPeriod').value = matchPeriod('SMA') || 20;
+    document.getElementById('emaPeriod').value = matchPeriod('EMA') || 50;
+    document.getElementById('rsiPeriod').value = matchPeriod('RSI') || 14;
+    document.getElementById('indVolumeProfile').checked = indicatorVisibility.volumeProfile;
+    document.getElementById('smaColor').value = indicatorColors.sma || COLORS.orange;
+    document.getElementById('emaColor').value = indicatorColors.ema || COLORS.purple;
+    document.getElementById('rsiColor').value = indicatorColors.rsi || COLORS.yellow;
+    document.getElementById('bbColor').value = indicatorColors.bollinger || COLORS.blue;
+    document.getElementById('volumeProfileBins').value = volumeProfileBins;
+}
+
+function getVolumeProfileShapes(bars, bins) {
+    const lows = bars.low || [], highs = bars.high || [], volumes = bars.volume || [];
+    const low = Math.min(...lows.filter(Number.isFinite));
+    const high = Math.max(...highs.filter(Number.isFinite));
+    if (!Number.isFinite(low) || !Number.isFinite(high) || high <= low) return [];
+    const step = (high - low) / bins;
+    const totals = Array(bins).fill(0);
+    for (let i = 0; i < volumes.length; i++) {
+        const price = Number(bars.close[i]);
+        const volume = Math.max(0, Number(volumes[i]) || 0);
+        const index = Math.min(bins - 1, Math.max(0, Math.floor((price - low) / step)));
+        totals[index] += volume;
+    }
+    const maxVolume = Math.max(...totals, 1);
+    return totals.map((volume, i) => {
+        const width = 0.18 * volume / maxVolume;
+        const bottom = low + i * step;
+        return { type: 'rect', xref: 'paper', yref: 'y', x0: 1 - width, x1: 1,
+            y0: bottom, y1: bottom + step, fillcolor: 'rgba(41,98,255,0.20)',
+            line: { width: 0 }, layer: 'below' };
     });
 }
 
@@ -410,6 +481,7 @@ async function updateChart(data) {
     let hasRSI = false;
     let hasMACD = false;
 
+    const profileShapes = indicatorVisibility.volumeProfile ? getVolumeProfileShapes(bars, volumeProfileBins) : [];
     // Indicator overlays
     for (const [name, values] of Object.entries(indicators)) {
         if (name.startsWith('RSI')) {
@@ -423,15 +495,15 @@ async function updateChart(data) {
             continue;
         }
 
-        let color = COLORS.orange;
+        let color = indicatorColors[name.startsWith('SMA') ? 'sma' : name.startsWith('EMA') ? 'ema' : 'bollinger'] || COLORS.orange;
         let dash = 'solid';
         let width = 1.5;
 
-        if (name.startsWith('SMA')) { color = COLORS.orange; }
-        else if (name.startsWith('EMA')) { color = COLORS.purple; }
-        else if (name === 'BB_Upper') { color = COLORS.blue; dash = 'dash'; width = 1; }
-        else if (name === 'BB_Middle') { color = COLORS.blue; width = 1; }
-        else if (name === 'BB_Lower') { color = COLORS.blue; dash = 'dash'; width = 1; }
+        if (name.startsWith('SMA')) { color = indicatorColors.sma || COLORS.orange; }
+        else if (name.startsWith('EMA')) { color = indicatorColors.ema || COLORS.purple; }
+        else if (name === 'BB_Upper') { color = indicatorColors.bollinger || COLORS.blue; dash = 'dash'; width = 1; }
+        else if (name === 'BB_Middle') { color = indicatorColors.bollinger || COLORS.blue; width = 1; }
+        else if (name === 'BB_Lower') { color = indicatorColors.bollinger || COLORS.blue; dash = 'dash'; width = 1; }
 
         traces.push({
             x: labels,
@@ -478,11 +550,11 @@ async function updateChart(data) {
     const layout = {
         ...baseLayout,
         dragmode: activeDrawingTool ? false : 'pan',
-        shapes: [...slTpLines, ...chartDrawings]
+        shapes: [...profileShapes, ...slTpLines, ...chartDrawings]
     };
 
     await Plotly.react('chart', traces, layout, plotConfig);
-    renderSubCharts(hasRSI, rsiData, hasMACD, macdData);
+    renderSubCharts(hasRSI && indicatorVisibility.rsi, rsiData, hasMACD, macdData);
     requestAnimationFrame(() => Plotly.Plots.resize('chart'));
 }
 
@@ -563,7 +635,7 @@ function renderSubCharts(hasRSI, rsiData, hasMACD, macdData) {
     const rsiCont = document.getElementById('rsiContainer');
     if (hasRSI && rsiData) {
         rsiCont.style.display = 'block';
-        const trace = { x: rsiData.labels, y: rsiData.values, type: 'scatter', mode: 'lines', line: { color: COLORS.yellow, width: 1.5 } };
+        const trace = { x: rsiData.labels, y: rsiData.values, type: 'scatter', mode: 'lines', name: rsiData.name, line: { color: indicatorColors.rsi || COLORS.yellow, width: 1.5 } };
         const layout = {
             paper_bgcolor: COLORS.bg, plot_bgcolor: COLORS.bg, margin: { l: 50, r: 60, t: 5, b: 20 },
             xaxis: { showticklabels: false, gridcolor: COLORS.grid },
@@ -573,7 +645,15 @@ function renderSubCharts(hasRSI, rsiData, hasMACD, macdData) {
                 { type: 'line', xref: 'paper', x0: 0, x1: 1, y0: 30, y1: 30, line: { color: COLORS.green, width: 0.5, dash: 'dot' } }
             ]
         };
-        Plotly.react('rsiChart', [trace], layout, { ...plotConfig, displayModeBar: false });
+        Plotly.react('rsiChart', [trace], layout, { ...plotConfig, displayModeBar: false }).then(() => {
+            const rsiChart = document.getElementById('rsiChart');
+            if (!rsiChart.dataset.settingsClickBound) {
+                rsiChart.dataset.settingsClickBound = 'true';
+                rsiChart.on('plotly_click', eventData => {
+                    if (eventData.points?.length) openIndicatorSettings('RSI');
+                });
+            }
+        });
     } else { rsiCont.style.display = 'none'; }
 
     const macdCont = document.getElementById('macdContainer');
@@ -585,7 +665,15 @@ function renderSubCharts(hasRSI, rsiData, hasMACD, macdData) {
         if (macdData['MACD_Signal']) mTraces.push({ x: macdLabels, y: macdData['MACD_Signal'].values, name: 'Signal', type: 'scatter', mode: 'lines', line: { color: COLORS.orange } });
         if (macdData['MACD_Hist']) mTraces.push({ x: macdLabels, y: macdData['MACD_Hist'].values, type: 'bar', marker: { color: macdData['MACD_Hist'].values.map(v => v >= 0 ? COLORS.green : COLORS.red) } });
         const mLayout = { paper_bgcolor: COLORS.bg, plot_bgcolor: COLORS.bg, margin: { l: 50, r: 60, t: 5, b: 20 }, xaxis: { showticklabels: false }, yaxis: { side: 'right' }, barmode: 'relative' };
-        Plotly.react('macdChart', mTraces, mLayout, { ...plotConfig, displayModeBar: false });
+        Plotly.react('macdChart', mTraces, mLayout, { ...plotConfig, displayModeBar: false }).then(() => {
+            const macdChart = document.getElementById('macdChart');
+            if (!macdChart.dataset.settingsClickBound) {
+                macdChart.dataset.settingsClickBound = 'true';
+                macdChart.on('plotly_click', eventData => {
+                    if (eventData.points?.length) openIndicatorSettings(eventData.points[0].data?.name || 'MACD');
+                });
+            }
+        });
     } else { macdCont.style.display = 'none'; }
 }
 
@@ -761,7 +849,10 @@ function setupControls() {
         await fetchData();
     });
 
-    document.getElementById('indicatorBtn').addEventListener('click', () => document.getElementById('indicatorModal').classList.remove('hidden'));
+    document.getElementById('indicatorBtn').addEventListener('click', () => {
+        syncIndicatorModal();
+        document.getElementById('indicatorModal').classList.remove('hidden');
+    });
     document.getElementById('closeModal').addEventListener('click', () => document.getElementById('indicatorModal').classList.add('hidden'));
     document.getElementById('applyIndicators').addEventListener('click', applyIndicators);
 }
@@ -829,6 +920,19 @@ async function applyIndicators() {
     await sendAction('/api/indicators', { action: 'clear' });
     const getVal = (id) => document.getElementById(id).value;
     const isChecked = (id) => document.getElementById(id).checked;
+
+    indicatorVisibility.rsi = isChecked('indRSI');
+    indicatorVisibility.volumeProfile = isChecked('indVolumeProfile');
+    localStorage.setItem('pyreplay-indicator-visibility', JSON.stringify(indicatorVisibility));
+    volumeProfileBins = Math.max(8, Math.min(60, parseInt(getVal('volumeProfileBins')) || 24));
+    localStorage.setItem('pyreplay-volume-profile-bins', String(volumeProfileBins));
+    indicatorColors = {
+        sma: document.getElementById('smaColor').value,
+        ema: document.getElementById('emaColor').value,
+        rsi: document.getElementById('rsiColor').value,
+        bollinger: document.getElementById('bbColor').value,
+    };
+    localStorage.setItem('pyreplay-indicator-colors', JSON.stringify(indicatorColors));
 
     if (isChecked('indSMA')) await sendAction('/api/indicators', { action: 'set', name: 'sma', settings: { period: parseInt(getVal('smaPeriod')) } });
     if (isChecked('indEMA')) await sendAction('/api/indicators', { action: 'set', name: 'ema', settings: { period: parseInt(getVal('emaPeriod')) } });

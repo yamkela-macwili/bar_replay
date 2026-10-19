@@ -227,14 +227,17 @@
                 <div class="indicator-item">
                     <label><input type="checkbox" id="indSMA"> SMA</label>
                     <input type="number" id="smaPeriod" value="20" min="2" max="200" class="param-input">
+                    <input type="color" id="smaColor" value="#ff9800" class="indicator-color" aria-label="SMA color">
                 </div>
                 <div class="indicator-item">
                     <label><input type="checkbox" id="indEMA"> EMA</label>
                     <input type="number" id="emaPeriod" value="50" min="2" max="200" class="param-input">
+                    <input type="color" id="emaColor" value="#ab47bc" class="indicator-color" aria-label="EMA color">
                 </div>
                 <div class="indicator-item">
                     <label><input type="checkbox" id="indRSI"> RSI</label>
                     <input type="number" id="rsiPeriod" value="14" min="2" max="100" class="param-input">
+                    <input type="color" id="rsiColor" value="#ffeb3b" class="indicator-color" aria-label="RSI color">
                 </div>
                 <div class="indicator-item">
                     <label><input type="checkbox" id="indMACD"> MACD</label>
@@ -254,7 +257,12 @@
                             title="Period">
                         <input type="number" id="bbStd" value="2" min="0.5" max="5" step="0.5" class="param-input small"
                             title="StdDev">
+                        <input type="color" id="bbColor" value="#2962ff" class="indicator-color" aria-label="Bollinger Bands color">
                     </span>
+                </div>
+                <div class="indicator-item">
+                    <label><input type="checkbox" id="indVolumeProfile"> Volume Profile</label>
+                    <span class="param-group"><label for="volumeProfileBins">Bins</label><input type="number" id="volumeProfileBins" value="24" min="8" max="60" class="param-input"></span>
                 </div>
             </div>
             <div class="modal-footer">

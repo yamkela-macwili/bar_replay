@@ -905,6 +905,23 @@ select:hover, select:focus {
     border-bottom: none;
 }
 
+.indicator-item-focused {
+    background: rgba(41, 98, 255, 0.12);
+    border-radius: var(--radius-sm);
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
+.indicator-color {
+    width: 30px;
+    height: 26px;
+    padding: 2px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    cursor: pointer;
+}
+
 .indicator-item label {
     display: flex;
     align-items: center;
