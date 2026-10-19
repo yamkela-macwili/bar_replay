@@ -8,7 +8,12 @@ let playInterval = null;
 let intervalMs = 1000;
 let currentData = null;
 let isLoadingMore = false;
+let hasMoreHistory = true;
 let currentSessionId = null;
+let loadMoreTimer = null;
+let activeDrawingTool = '';
+let drawingPoints = [];
+let chartDrawings = [];
 
 // ── Color Palette ─────────────────────────────────────────
 const COLORS = {
@@ -69,6 +74,7 @@ const baseLayout = {
 const plotConfig = {
     responsive: true,
     displayModeBar: true,
+    modeBarButtonsToAdd: ['eraseshape'],
     modeBarButtonsToRemove: ['select2d', 'lasso2d', 'toImage'],
     displaylogo: false,
     scrollZoom: true,
@@ -76,11 +82,15 @@ const plotConfig = {
 
 // ── Initialization ────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-    await bootstrapSession();
-    initChart();
+    await initChart();
     setupControls();
     setupKeyboard();
-    fetchData();  // Load initial data
+    const loadButton = document.getElementById('loadBtn');
+    loadButton.disabled = true;
+    showChartMessage('Loading market data…', 'loading');
+    await bootstrapSession();
+    loadButton.disabled = false;
+    await loadSelectedData();
 });
 
 async function bootstrapSession() {
@@ -96,24 +106,122 @@ async function bootstrapSession() {
     }
 }
 
-function initChart() {
+async function initChart() {
     const chart = document.getElementById('chart');
-    Plotly.newPlot(chart, [], { ...baseLayout }, plotConfig);
+    await Plotly.newPlot(chart, [], { ...baseLayout }, plotConfig);
 
     // Lazy loading scroll detection
     chart.on('plotly_relayout', (eventData) => {
-        if (eventData['xaxis.range[0]'] !== undefined) {
-            const startIdx = eventData['xaxis.range[0]'];
-            // If scrolled near the beginning (left side) of data
-            if (startIdx < 5 && !isLoadingMore) {
-                loadMoreData('backward');
-            }
+        const shapeWasEdited = Object.keys(eventData).some(key => key === 'shapes' || key.startsWith('shapes['));
+        if (shapeWasEdited) {
+            const fixedShapeCount = currentData
+                ? getSLTPLines(currentData.open_positions || []).length : 0;
+            const shapes = chart.layout?.shapes || [];
+            chartDrawings = shapes.slice(fixedShapeCount).map(shape => JSON.parse(JSON.stringify(shape)));
+            saveDrawings();
+            document.getElementById('drawingMessage').textContent = 'Drawing saved';
         }
+
+        const start = eventData['xaxis.range[0]'] ?? eventData['xaxis.range']?.[0];
+        if (start === undefined || isLoadingMore || !hasMoreHistory || !currentData?.bars?.datetime?.length) return;
+        const categories = chart.data?.[0]?.x || [];
+        let startPosition = typeof start === 'number' ? start : categories.indexOf(start);
+        if (startPosition < 0 && Number.isFinite(Number(start))) startPosition = Number(start);
+        if (startPosition >= 0 && startPosition < Math.min(5, categories.length)) {
+            if (loadMoreTimer) clearTimeout(loadMoreTimer);
+            loadMoreTimer = setTimeout(() => loadMoreData('backward'), 150);
+        }
+    });
+
+    chart.on('plotly_click', (eventData) => {
+        if (!activeDrawingTool || !eventData.points?.length) return;
+        const point = eventData.points[0];
+        addDrawingPoint({ x: point.x, y: Number(point.y) });
     });
 }
 
+function drawingStorageKey() {
+    return `pyreplay-drawings:${document.getElementById('symbolSelect').value}:${document.getElementById('timeframeSelect').value}`;
+}
+
+function restoreDrawings() {
+    try {
+        chartDrawings = JSON.parse(localStorage.getItem(drawingStorageKey()) || '[]');
+        if (!Array.isArray(chartDrawings)) chartDrawings = [];
+        chartDrawings = chartDrawings.map(shape => ({ ...shape, editable: true }));
+    } catch (_) {
+        chartDrawings = [];
+    }
+}
+
+function saveDrawings() {
+    localStorage.setItem(drawingStorageKey(), JSON.stringify(chartDrawings));
+}
+
+function drawingShape(type, x0, y0, x1, y1, extra = {}) {
+    return { type, xref: 'x', yref: 'y', x0, y0, x1, y1, editable: true, ...extra };
+}
+
+function finishDrawing() {
+    activeDrawingTool = '';
+    drawingPoints = [];
+    const selector = document.getElementById('drawingTool');
+    if (selector) selector.value = '';
+}
+
+function addDrawingPoint(point) {
+    const tool = activeDrawingTool;
+    const message = document.getElementById('drawingMessage');
+    if (['hline', 'hray'].includes(tool)) {
+        const shapes = tool === 'hline'
+            ? [drawingShape('line', 0, point.y, 1, point.y, { xref: 'paper', line: { color: COLORS.yellow, width: 1.5 } })]
+            : [drawingShape('line', point.x, point.y, document.getElementById('chart').data[0].x.at(-1), point.y, { line: { color: COLORS.yellow, width: 1.5 } })];
+        chartDrawings.push(...shapes);
+    } else if (tool === 'vline') {
+        chartDrawings.push(drawingShape('line', point.x, 0, point.x, 1, {
+            yref: 'paper', line: { color: COLORS.blue, width: 1.5 }
+        }));
+    } else if (tool === 'vray') {
+        chartDrawings.push(drawingShape('line', point.x, point.y, point.x, 1, {
+            line: { color: COLORS.blue, width: 1.5 }
+        }));
+    } else {
+        drawingPoints.push(point);
+        const needed = tool === 'long' || tool === 'short' ? 3 : 2;
+        if (drawingPoints.length < needed) {
+            message.textContent = tool === 'long' || tool === 'short'
+                ? `Click ${needed - drawingPoints.length} more point(s)` : 'Click the second point';
+            return;
+        }
+        const [a, b, c] = drawingPoints;
+        if (tool === 'trend') {
+            chartDrawings.push(drawingShape('line', a.x, a.y, b.x, b.y, { line: { color: COLORS.orange, width: 2 } }));
+        } else if (tool === 'rect') {
+            chartDrawings.push(drawingShape('rect', a.x, a.y, b.x, b.y, {
+                line: { color: COLORS.blue, width: 1.5 }, fillcolor: 'rgba(41, 98, 255, 0.10)'
+            }));
+        } else {
+            const isLong = tool === 'long';
+            const riskColor = 'rgba(239, 83, 80, 0.18)';
+            const rewardColor = 'rgba(38, 166, 154, 0.18)';
+            chartDrawings.push(
+                drawingShape('rect', a.x, a.y, c.x, b.y, { line: { color: COLORS.red, width: 1 }, fillcolor: riskColor }),
+                drawingShape('rect', a.x, a.y, c.x, c.y, { line: { color: COLORS.green, width: 1 }, fillcolor: rewardColor }),
+                drawingShape('line', a.x, a.y, c.x, a.y, { line: { color: isLong ? COLORS.green : COLORS.red, width: 1.5, dash: 'dash' } })
+            );
+        }
+        drawingPoints = [];
+    }
+    saveDrawings();
+    if (['hline', 'hray', 'vline', 'vray'].includes(tool) || drawingPoints.length === 0) {
+        finishDrawing();
+    }
+    if (currentData) updateChart(currentData);
+    message.textContent = 'Drawing added';
+}
+
 // ── Data Fetching ─────────────────────────────────────────
-async function fetchData(isInitialLoad = false, visibleCount = 200, startIndex = null) {
+async function fetchData() {
     try {
         const url = `/api/data?session_id=${currentSessionId}`;
         const res = await fetch(url);
@@ -122,20 +230,19 @@ async function fetchData(isInitialLoad = false, visibleCount = 200, startIndex =
             currentData = data;
             if (data.session_id) currentSessionId = data.session_id;
 
-            // If it's the first load of a symbol/timeframe, set the initial range
-            const layoutUpdate = {};
-            if (isInitialLoad && startIndex !== null) {
-                layoutUpdate['xaxis.range'] = [startIndex, startIndex + visibleCount];
-            }
-
-            updateChart(data, layoutUpdate);
+            await updateChart(data);
+            updateMarketDataStatus(data.market_data);
+            showChartMessage('', 'hidden');
             updateStats(data.account);
             updateProgress(data.progress);
             updatePositions(data.open_positions);
             updateHistory(data.trade_history);
+        } else {
+            showChartMessage(data.message || 'Could not load chart data. Use Load to retry.', 'error');
         }
     } catch (err) {
         console.error('Failed to fetch data:', err);
+        showChartMessage('Could not reach the server. Check the connection and use Load to retry.', 'error');
     }
 }
 
@@ -157,17 +264,21 @@ async function loadMoreData(direction = 'backward') {
 
             // Store previous range to maintain scroll position
             const chart = document.getElementById('chart');
-            const oldRange = chart.layout.xaxis.range;
-            const newRange = [oldRange[0] + result.added, oldRange[1] + result.added];
+            const oldRange = chart.layout?.xaxis?.range || chart._fullLayout?.xaxis?.range;
+            const preservedRange = oldRange?.map(value =>
+                typeof value === 'number' ? value + result.added : value
+            );
 
             // Refresh data and chart, preserving the offset
-            await fetchData(false);
+            await fetchData();
 
             // Adjust range to keep focus on same bars
-            Plotly.relayout('chart', { 'xaxis.range': newRange });
+            if (preservedRange) await Plotly.relayout('chart', { 'xaxis.range': preservedRange });
         } else if (result.added === 0 && result.total_bars >= 3000) {
+            hasMoreHistory = false;
             console.info('ℹ️ Memory ceiling reached (3000 bars). Backward scrolling locked.');
         } else {
+            if (result.status === 'ok' && result.added === 0) hasMoreHistory = false;
             console.log('ℹ️ No more data available from provider');
         }
     } catch (err) {
@@ -194,9 +305,75 @@ async function sendAction(endpoint, body = {}) {
     }
 }
 
+function showChartMessage(message, state) {
+    const element = document.getElementById('chartMessage');
+    if (!element) return;
+    document.getElementById('chartMessageText').textContent = message;
+    element.className = `chart-message ${state}`;
+    document.getElementById('retryLoad').hidden = state !== 'error';
+}
+
+async function loadSelectedData() {
+    const button = document.getElementById('loadBtn');
+    button.disabled = true;
+    stopPlaying();
+    hasMoreHistory = true;
+    showChartMessage('Loading market data…', 'loading');
+
+    try {
+        while (true) {
+            const symbol = document.getElementById('symbolSelect').value;
+            const timeframe = document.getElementById('timeframeSelect').value;
+            const balanceInput = document.getElementById('balanceInput');
+            const initialBalance = Number(balanceInput.value);
+            if (!Number.isFinite(initialBalance) || initialBalance <= 0) {
+                throw new Error('Enter a balance greater than zero.');
+            }
+            const result = await sendAction('/api/load', {
+                symbol, timeframe, provider: 'yfinance', initial_balance: initialBalance
+            });
+            if (!result || result.status !== 'ok') {
+                throw new Error(result?.message || 'Load failed. Check the symbol and timeframe, then retry.');
+            }
+
+            currentSessionId = result.session_id;
+            // If the user changed a selection while the request was running, load the new choice.
+            if (symbol !== document.getElementById('symbolSelect').value ||
+                timeframe !== document.getElementById('timeframeSelect').value ||
+                initialBalance !== Number(balanceInput.value)) continue;
+
+            const response = await fetch(`/api/data?session_id=${currentSessionId}`);
+            const data = await response.json();
+            if (!response.ok || data.status !== 'ok') {
+                throw new Error(data.message || 'No chart data was returned for this selection.');
+            }
+            if (symbol !== document.getElementById('symbolSelect').value ||
+                timeframe !== document.getElementById('timeframeSelect').value ||
+                initialBalance !== Number(balanceInput.value)) continue;
+            currentData = data;
+            restoreDrawings();
+            await updateChart(data);
+            updateMarketDataStatus(data.market_data);
+            updateStats(data.account);
+            updateProgress(data.progress);
+            updatePositions(data.open_positions);
+            updateHistory(data.trade_history);
+            balanceInput.value = Number(data.account.balance).toFixed(2);
+            delete balanceInput.dataset.dirty;
+            showChartMessage('', 'hidden');
+            return;
+        }
+    } catch (err) {
+        console.error('Failed to load chart:', err);
+        showChartMessage(`${err.message} Use Load to retry.`, 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
 
 // ── Chart Rendering ───────────────────────────────────────
-function updateChart(data, layoutUpdate = null) {
+async function updateChart(data) {
     const bars = data.bars;
     const indicators = data.indicators || {};
     const positions = data.open_positions || [];
@@ -300,12 +477,13 @@ function updateChart(data, layoutUpdate = null) {
 
     const layout = {
         ...baseLayout,
-        shapes: slTpLines,
-        ...layoutUpdate
+        dragmode: activeDrawingTool ? false : 'pan',
+        shapes: [...slTpLines, ...chartDrawings]
     };
 
-    Plotly.react('chart', traces, layout, plotConfig);
+    await Plotly.react('chart', traces, layout, plotConfig);
     renderSubCharts(hasRSI, rsiData, hasMACD, macdData);
+    requestAnimationFrame(() => Plotly.Plots.resize('chart'));
 }
 
 function getTradeMarkers(openPos, closedPos, bars, labels) {
@@ -402,9 +580,10 @@ function renderSubCharts(hasRSI, rsiData, hasMACD, macdData) {
     if (hasMACD) {
         macdCont.style.display = 'block';
         const mTraces = [];
-        if (macdData['MACD']) mTraces.push({ x: rsiData.labels, y: macdData['MACD'].values, name: 'MACD', line: { color: COLORS.blue } });
-        if (macdData['MACD_Signal']) mTraces.push({ x: rsiData.labels, y: macdData['MACD_Signal'].values, name: 'Signal', line: { color: COLORS.orange } });
-        if (macdData['MACD_Hist']) mTraces.push({ x: rsiData.labels, y: macdData['MACD_Hist'].values, type: 'bar', marker: { color: macdData['MACD_Hist'].values.map(v => v >= 0 ? COLORS.green : COLORS.red) } });
+        const macdLabels = macdData['MACD']?.labels || macdData['MACD_Signal']?.labels || macdData['MACD_Hist']?.labels || [];
+        if (macdData['MACD']) mTraces.push({ x: macdLabels, y: macdData['MACD'].values, name: 'MACD', type: 'scatter', mode: 'lines', line: { color: COLORS.blue } });
+        if (macdData['MACD_Signal']) mTraces.push({ x: macdLabels, y: macdData['MACD_Signal'].values, name: 'Signal', type: 'scatter', mode: 'lines', line: { color: COLORS.orange } });
+        if (macdData['MACD_Hist']) mTraces.push({ x: macdLabels, y: macdData['MACD_Hist'].values, type: 'bar', marker: { color: macdData['MACD_Hist'].values.map(v => v >= 0 ? COLORS.green : COLORS.red) } });
         const mLayout = { paper_bgcolor: COLORS.bg, plot_bgcolor: COLORS.bg, margin: { l: 50, r: 60, t: 5, b: 20 }, xaxis: { showticklabels: false }, yaxis: { side: 'right' }, barmode: 'relative' };
         Plotly.react('macdChart', mTraces, mLayout, { ...plotConfig, displayModeBar: false });
     } else { macdCont.style.display = 'none'; }
@@ -415,6 +594,10 @@ function updateStats(account) {
     if (!account) return;
     const f = (v) => `$${v.toFixed(2)}`;
     document.getElementById('statBalance').textContent = f(account.balance);
+    const balanceInput = document.getElementById('balanceInput');
+    if (balanceInput.dataset.dirty !== 'true') {
+        balanceInput.value = Number(account.balance).toFixed(2);
+    }
     document.getElementById('statEquity').textContent = f(account.equity);
     const float = document.getElementById('statFloating');
     float.textContent = f(account.floating_pnl);
@@ -433,7 +616,28 @@ function updateProgress(progress) {
     slider.max = progress.total_bars - 1;
     slider.value = progress.current_index;
     document.getElementById('progressLabel').textContent = `${progress.current_index + 1} / ${progress.total_bars}`;
-    document.getElementById('currentDatetime').textContent = progress.current_datetime || '--';
+    document.getElementById('currentDatetime').textContent = formatLocalTime(progress.current_datetime);
+}
+
+function formatLocalTime(timestamp) {
+    if (!timestamp) return '--';
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return String(timestamp);
+    return new Intl.DateTimeFormat(undefined, {
+        year: 'numeric', month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit'
+    }).format(date);
+}
+
+function updateMarketDataStatus(marketData) {
+    const status = document.getElementById('latestDataStatus');
+    if (!status || !marketData?.latest_bar) return;
+    const latestDate = new Date(marketData.latest_bar);
+    const isToday = latestDate.toDateString() === new Date().toDateString();
+    const note = marketData.refresh_error ? ' · refresh failed' : (!isToday ? ' · no bar today' : '');
+    status.textContent = `Latest ${marketData.symbol} ${marketData.timeframe}: ${formatLocalTime(marketData.latest_bar)}${note}`;
+    status.classList.toggle('stale', Boolean(marketData.refresh_error) || !isToday);
+    status.title = `Latest bar returned by ${marketData.provider}; displayed in your local timezone. ${marketData.refresh_error ? `The provider refresh failed: ${marketData.refresh_error}` : (isToday ? 'The latest bar date is today.' : 'The provider returned no bar dated today; the market may be closed or its feed may be delayed.')} ${marketData.checked_at ? `Provider request checked ${formatLocalTime(marketData.checked_at)}.` : 'No provider refresh was attempted for this data load.'}`;
 }
 
 function updatePositions(positions) {
@@ -464,24 +668,58 @@ function updateHistory(history) {
 // ── Controls Setup ────────────────────────────────────────
 function setupControls() {
     document.getElementById('loadBtn').addEventListener('click', async () => {
-        // const provider = document.getElementById('providerSelect').value;
-        const provider = 'yfinance'
-        const symbol = document.getElementById('symbolSelect').value;
-        const timeframe = document.getElementById('timeframeSelect').value;
-
-        stopPlaying();
-
-        // Visual feedback: Clear chart for a moment or show loading
-        Plotly.purge('chart');
-        initChart();
-
-        const res = await sendAction('/api/load', { symbol, timeframe, provider });
-        if (res && res.status === 'ok') {
-            currentSessionId = res.session_id;
-            await fetchData(true, res.visible_count, res.start_index);
-        } else {
-            alert(`Error: ${res?.message || 'Load failed'}`);
+        await loadSelectedData();
+    });
+    document.getElementById('retryLoad').addEventListener('click', loadSelectedData);
+    const drawingTool = document.getElementById('drawingTool');
+    drawingTool.addEventListener('change', () => {
+        activeDrawingTool = drawingTool.value;
+        drawingPoints = [];
+        const labels = {
+            hline: 'Click chart for horizontal line', hray: 'Click chart for horizontal ray',
+            vline: 'Click chart for vertical line', vray: 'Click chart for vertical ray',
+            trend: 'Click two points for trend line', rect: 'Click two corners for rectangle',
+            long: 'Click entry, stop, then target', short: 'Click entry, stop, then target'
+        };
+        document.getElementById('drawingMessage').textContent = labels[activeDrawingTool] ||
+            'Click a drawing to select it; drag its handles to edit. Use the eraser to remove it.';
+        Plotly.relayout('chart', { dragmode: activeDrawingTool ? false : 'pan' });
+    });
+    document.getElementById('clearDrawings').addEventListener('click', () => {
+        chartDrawings = [];
+        drawingPoints = [];
+        saveDrawings();
+        document.getElementById('drawingMessage').textContent = 'Drawings cleared';
+        if (currentData) updateChart(currentData);
+    });
+    const balanceInput = document.getElementById('balanceInput');
+    balanceInput.addEventListener('input', () => { balanceInput.dataset.dirty = 'true'; });
+    document.getElementById('balanceForm').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const message = document.getElementById('balanceMessage');
+        const button = event.currentTarget.querySelector('button[type="submit"]');
+        const value = Number(balanceInput.value);
+        if (!Number.isFinite(value) || value <= 0) {
+            message.textContent = 'Enter a balance greater than zero.';
+            message.className = 'error';
+            return;
         }
+
+        button.disabled = true;
+        message.textContent = 'Updating balance…';
+        message.className = '';
+        const result = await sendAction('/api/account/balance', { balance: value });
+        if (result?.status === 'ok') {
+            updateStats(result.account);
+            balanceInput.value = Number(result.account.balance).toFixed(2);
+            delete balanceInput.dataset.dirty;
+            message.textContent = 'Balance updated. Open trade P&L is unchanged.';
+            message.className = 'success';
+        } else {
+            message.textContent = result?.message || 'Could not update the balance.';
+            message.className = 'error';
+        }
+        button.disabled = false;
     });
 
     document.getElementById('playPauseBtn').addEventListener('click', togglePlay);
@@ -532,6 +770,12 @@ function setupControls() {
 function setupKeyboard() {
     document.addEventListener('keydown', (e) => {
         if (e.target.tagName === 'INPUT') return;
+        if (e.code === 'Escape' && activeDrawingTool) {
+            finishDrawing();
+            document.getElementById('drawingMessage').textContent = 'Drawing cancelled';
+            Plotly.relayout('chart', { dragmode: 'pan' });
+            return;
+        }
         if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
         if (e.code === 'ArrowRight') stepForward();
         if (e.code === 'ArrowLeft') stepBack();

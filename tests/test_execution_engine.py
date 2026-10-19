@@ -24,7 +24,7 @@ class TestPosition:
         pos = Position("buy", 0.1, 1.08500, spread=0.0002)
         pos.close(1.08600)
         assert pos.status == "closed"
-        assert pos.exit_price == 1.08600
+        assert pos.exit_price == 1.08590
         assert pos.pnl > 0
 
     def test_to_dict(self):
@@ -120,3 +120,62 @@ class TestExecutionEngine:
         assert engine.balance == 10000
         assert len(engine.open_positions) == 0
         assert len(engine.closed_positions) == 0
+
+    def test_spread_is_charged_once_across_an_open_and_closed_trade(self):
+        engine = ExecutionEngine(initial_balance=10000, spread_pips=2, commission=0)
+        position = engine.open_position("buy", lot_size=1, current_price=1.10000)
+
+        live = engine.get_account_state(1.10000)
+        assert position["entry_price"] == 1.10010
+        assert live["balance"] == 10000
+        assert live["floating_pnl"] == -20
+        assert live["equity"] == 9980
+        assert engine.get_open_positions(1.10000)[0]["pnl"] == -20
+
+        closed = engine.close_position(position["id"], 1.10000)
+        assert closed["exit_price"] == 1.09990
+        assert closed["pnl"] == -20
+        assert engine.balance == 9980
+
+    def test_commission_is_booked_once_per_side(self):
+        engine = ExecutionEngine(initial_balance=10000, spread_pips=0, commission=7)
+        position = engine.open_position("buy", lot_size=1, current_price=1.10000)
+
+        live = engine.get_account_state(1.10000)
+        assert live["balance"] == 9993
+        assert live["floating_pnl"] == -7
+        assert live["equity"] == 9986
+
+        closed = engine.close_position(position["id"], 1.10000)
+        assert closed["pnl"] == -14
+        assert engine.balance == 9986
+
+    def test_usd_base_fx_pnl_is_converted_from_quote_currency(self):
+        engine = ExecutionEngine(initial_balance=10000, spread_pips=0, commission=0)
+        engine.open_position("buy", lot_size=0.1, current_price=150, symbol="USDJPY")
+        assert engine.get_floating_pnl(151) == 66.23
+
+    def test_changing_balance_preserves_open_trade_pnl_and_updates_equity(self):
+        engine = ExecutionEngine(initial_balance=10000, spread_pips=0, commission=0)
+        engine.open_position("buy", lot_size=1, current_price=1.10000)
+        before = engine.get_account_state(1.10100)
+
+        engine.set_balance(20000)
+        after = engine.get_account_state(1.10100)
+
+        assert before["floating_pnl"] == after["floating_pnl"] == 100
+        assert after["balance"] == 20000
+        assert after["equity"] == 20100
+
+    @pytest.mark.parametrize("value", [0, -10, float("inf"), float("nan"), "invalid"])
+    def test_balance_must_be_positive_and_finite(self, value):
+        engine = ExecutionEngine(initial_balance=10000)
+        with pytest.raises(ValueError, match="positive finite"):
+            engine.set_balance(value)
+
+    def test_drawdown_includes_open_trade_equity_losses(self):
+        engine = ExecutionEngine(initial_balance=10000, spread_pips=0, commission=0)
+        engine.open_position("buy", lot_size=1, current_price=1.10000)
+        state = engine.get_account_state(1.09000)
+        assert state["equity"] == 9000
+        assert state["max_drawdown"] == 10

@@ -69,6 +69,8 @@ html, body {
     -webkit-font-smoothing: antialiased;
 }
 
+html { min-width: 320px; }
+
 /* ── Top Navigation Bar ────────────────────────────────── */
 #topBar {
     height: var(--topbar-h);
@@ -151,6 +153,16 @@ select:hover, select:focus {
     align-items: center;
     gap: 8px;
 }
+
+.latest-data-status {
+    max-width: 250px;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.latest-data-status.stale { color: var(--orange); }
 
 .status-dot {
     width: 8px;
@@ -347,6 +359,144 @@ select:hover, select:focus {
     height: 100%;
 }
 
+.drawing-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.drawing-controls label,
+.drawing-message {
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.drawing-controls select {
+    max-width: 145px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.drawing-message { min-width: 100px; }
+
+@media (max-width: 1100px) {
+    .drawing-message { display: none; }
+    .drawing-controls label { display: none; }
+    .controls-group { gap: 7px; }
+    #topBar { gap: 8px; padding-inline: 10px; }
+    .logo { margin-right: 0; }
+}
+
+@media (max-width: 900px) {
+    html, body { height: auto; min-height: 100%; overflow-x: hidden; overflow-y: auto; }
+    #topBar {
+        height: auto;
+        min-height: var(--topbar-h);
+        flex-wrap: wrap;
+        padding: 8px 10px;
+        gap: 8px;
+    }
+    .logo { flex: 1 1 auto; }
+    .top-right { flex: 0 1 auto; }
+    .latest-data-status { max-width: min(52vw, 320px); }
+    .controls-group {
+        order: 3;
+        display: grid;
+        flex: 1 0 100%;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto minmax(0, 1.2fr);
+        gap: 7px;
+    }
+    .control-item { min-width: 0; align-items: flex-start; flex-direction: column; gap: 3px; }
+    .control-item select { width: 100%; }
+    .controls-group > .btn { align-self: end; min-height: 34px; padding-inline: 8px; }
+    .controls-group .separator { display: none; }
+    .drawing-controls { min-width: 0; }
+    .drawing-controls select { width: 100%; max-width: none; }
+
+    #mainContent { height: auto; min-height: calc(100dvh - 96px); overflow: visible; }
+    #chartSection { flex: none; }
+    #chartContainer { height: 52vh; min-height: 320px; }
+    #chart { min-height: 320px; }
+    .sub-chart { height: 110px; flex: none; }
+
+    #replayControls {
+        height: auto;
+        min-height: var(--controls-h);
+        flex-wrap: wrap;
+        padding: 9px 10px;
+        gap: 8px;
+    }
+    .replay-buttons { gap: 4px; }
+    .replay-buttons .btn-icon { width: 32px; height: 32px; }
+    .replay-buttons .btn-play { width: 38px; height: 38px; }
+    .speed-control { margin-left: auto; gap: 5px; }
+    .speed-buttons { gap: 3px; }
+    .btn-speed { padding: 4px 7px; }
+    .progress-section { order: 3; flex: 1 0 100%; min-width: 0; }
+    .progress-label { min-width: 62px; }
+    .datetime-display { flex: 1 1 auto; min-width: 0; text-align: right; }
+    .datetime-text { font-size: 10px; }
+
+    #bottomPanels {
+        height: auto;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        overflow: visible;
+    }
+    .panel { min-width: 0; min-height: 190px; max-height: 310px; }
+    .stats-panel { grid-column: 1 / -1; }
+}
+
+@media (min-width: 901px) and (max-width: 1100px) {
+    #topBar { height: auto; min-height: var(--topbar-h); flex-wrap: wrap; }
+    .controls-group { order: 3; flex: 1 0 100%; flex-wrap: wrap; }
+    .top-right { margin-left: auto; }
+}
+
+@media (max-width: 600px) {
+    #topBar { padding: 7px 8px; }
+    .latest-data-status { max-width: 48vw; font-size: 9px; }
+    .controls-group {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+    }
+    .control-item label { font-size: 9px; }
+    .controls-group > .btn { width: 100%; }
+    .controls-group > #indicatorBtn { grid-column: 1; }
+    .drawing-controls { grid-column: 2; }
+    .drawing-controls select { min-width: 0; }
+    #chartContainer { height: 48vh; min-height: 290px; }
+    #chart { min-height: 290px; }
+    #bottomPanels { grid-template-columns: minmax(0, 1fr); }
+    .stats-panel { grid-column: auto; }
+    .panel { max-height: 270px; }
+    .trade-inputs { flex-wrap: wrap; }
+    .input-group { min-width: 78px; }
+    .trade-buttons { flex-wrap: wrap; }
+    .trade-buttons .btn { flex: 1 1 auto; padding-inline: 8px; }
+}
+
+.chart-message {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    padding: 24px;
+    background: rgba(19, 23, 34, 0.88);
+    color: var(--text-primary);
+    text-align: center;
+}
+
+.chart-message.hidden { display: none; }
+.chart-message.error { color: #ff8a80; }
+.chart-message.loading { color: var(--text-primary); }
+
 .sub-chart {
     height: 120px;
     border-top: 1px solid var(--border);
@@ -516,6 +666,40 @@ select:hover, select:focus {
 .stat-value.positive { color: var(--green); }
 .stat-value.negative { color: var(--red); }
 .stat-value.neutral { color: var(--text-secondary); }
+
+.balance-form {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 10px;
+}
+
+.balance-form > label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.balance-form-controls {
+    display: flex;
+    gap: 6px;
+}
+
+.balance-form-controls input {
+    min-width: 0;
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    padding: 5px 7px;
+    font-size: 12px;
+}
+
+#balanceMessage { min-height: 14px; font-size: 10px; color: var(--text-secondary); }
+#balanceMessage.error { color: var(--red); }
+#balanceMessage.success { color: var(--green); }
 
 /* ── Trading Panel ─────────────────────────────────────── */
 .trade-controls {

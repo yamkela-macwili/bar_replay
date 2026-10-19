@@ -6,10 +6,18 @@ A professional-grade bar replay trading simulator inspired by TradingView. Step 
 
 - **👥 Multi-User Scalability** — Isolated concurrent replay sessions via Redis-backed state management
 - **📊 Professional Charting** — Interactive Plotly.js chart with technical indicators (SMA, EMA, RSI, MACD, BB)
+- **🖍️ Chart Drawings** — Horizontal/vertical lines and rays, trend lines, rectangles, and long/short position zones; drawings can be edited and are saved per symbol/timeframe
+- **📱 Responsive Layout** — Chart, replay controls, and account/trading panels adapt to tablet and phone widths
 - **⏯️ Replay Controls** — Play, pause, step forward/back, jump, adjustable speed (1x–10x)
 - **💹 Trading Simulation** — Buy/sell with SL/TP, isolated account stats, and real-time equity tracking
 - **🔄 Smart Caching** — Thread-safe Parquet caching with Yahoo Finance as the default data provider
 - **⌨️ Keyboard Shortcuts** — Space (play/pause), arrows (step), B/S (buy/sell)
+
+## Data and TradingView Scope
+
+This project is a bar-replay trading simulator inspired by TradingView, not a replacement for TradingView Supercharts. It currently provides one chart, five intervals (M5, M15, H1, H4, D1), a small indicator set, basic drawings, and simulated orders. It does not provide a live tick stream, exchange subscriptions, alerts, watchlists, news, Pine Script, or broker connectivity.
+
+Loading a chart asks Yahoo Finance for the latest available bars and displays the newest returned timestamp in the chart header. Yahoo availability and market hours determine that timestamp; when a market is closed or the refresh fails, the app shows the last available bar and flags a failed refresh instead of fabricating a bar for today. H4 bars are aggregated from hourly data.
 
 ## Quick Start (Scaling Mode)
 

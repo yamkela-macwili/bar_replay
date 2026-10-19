@@ -40,7 +40,6 @@
             <div class="control-item">
                 <label for="timeframeSelect">Timeframe</label>
                 <select id="timeframeSelect">
-                    <option value="M1">M1</option>
                     <option value="M5">M5</option>
                     <option value="M15">M15</option>
                     <option value="H1" selected>H1</option>
@@ -55,8 +54,25 @@
             <button id="indicatorBtn" class="btn btn-ghost" title="Indicators">
                 <span>📈</span> Indicators
             </button>
+            <div class="drawing-controls">
+                <label for="drawingTool">Draw</label>
+                <select id="drawingTool" aria-label="Chart drawing tool">
+                    <option value="">Select tool</option>
+                    <option value="hline">Horizontal line</option>
+                    <option value="hray">Horizontal ray</option>
+                    <option value="vline">Vertical line</option>
+                    <option value="vray">Vertical ray</option>
+                    <option value="trend">Trend line</option>
+                    <option value="rect">Rectangle</option>
+                    <option value="long">Long position</option>
+                    <option value="short">Short position</option>
+                </select>
+                <button id="clearDrawings" class="btn btn-ghost" type="button" title="Clear drawings">Clear</button>
+            </div>
+            <span id="drawingMessage" class="drawing-message" role="status" aria-live="polite">Select a drawing to edit; use the modebar eraser to remove it.</span>
         </div>
         <div class="top-right">
+            <span id="latestDataStatus" class="latest-data-status" title="Latest timestamp returned by the market data provider">Latest bar: --</span>
             <span id="connectionStatus" class="status-dot connected" title="Connected"></span>
         </div>
     </header>
@@ -67,6 +83,10 @@
         <section id="chartSection">
             <div id="chartContainer">
                 <div id="chart"></div>
+                <div id="chartMessage" class="chart-message hidden" role="status" aria-live="polite">
+                    <span id="chartMessageText"></span>
+                    <button id="retryLoad" class="btn btn-primary" type="button" hidden>Retry</button>
+                </div>
             </div>
             <div id="rsiContainer" class="sub-chart" style="display:none;">
                 <div id="rsiChart"></div>
@@ -142,6 +162,14 @@
                         <span id="statTrades" class="stat-value">0</span>
                     </div>
                 </div>
+                <form id="balanceForm" class="balance-form">
+                    <label for="balanceInput">Set cash balance (USD)</label>
+                    <div class="balance-form-controls">
+                        <input type="number" id="balanceInput" value="{{ '%.2f'|format(initial_balance) }}" min="0.01" step="0.01" required>
+                        <button type="submit" class="btn btn-ghost">Apply</button>
+                    </div>
+                    <span id="balanceMessage" role="status" aria-live="polite"></span>
+                </form>
             </div>
 
             <!-- Trading Panel -->

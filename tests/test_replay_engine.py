@@ -64,7 +64,7 @@ class TestReplayEngine:
     def test_get_visible_data(self, engine):
         engine.jump_to(10)
         visible = engine.get_visible_data()
-        assert len(visible) == 11  # bars 0-10
+        assert len(visible["bars"]) == 11  # bars 0-10
 
     def test_get_current_bar(self, engine):
         bar = engine.get_current_bar()

@@ -4,6 +4,14 @@ import numpy as np
 import pandas as pd
 
 
+def _json_values(values, digits):
+    """Round indicator values while encoding warm-up gaps as JSON nulls."""
+    return [
+        round(float(value), digits) if pd.notna(value) and np.isfinite(value) else None
+        for value in values
+    ]
+
+
 def compute_sma(df, period=20, column="close"):
     """Compute Simple Moving Average.
 
@@ -15,7 +23,7 @@ def compute_sma(df, period=20, column="close"):
     Returns:
         Series with SMA values.
     """
-    return df[column].rolling(window=period, min_periods=1).mean()
+    return df[column].rolling(window=period, min_periods=period).mean()
 
 
 def compute_ema(df, period=20, column="close"):
@@ -93,8 +101,8 @@ def compute_bollinger(df, period=20, std_dev=2.0, column="close"):
     Returns:
         Dict with 'upper', 'middle', 'lower' Series.
     """
-    middle = df[column].rolling(window=period, min_periods=1).mean()
-    std = df[column].rolling(window=period, min_periods=1).std().fillna(0)
+    middle = df[column].rolling(window=period, min_periods=period).mean()
+    std = df[column].rolling(window=period, min_periods=period).std()
     upper = middle + std_dev * std
     lower = middle - std_dev * std
 
@@ -128,17 +136,17 @@ def compute_indicators(df, active_indicators):
         if name == "sma":
             period = settings.get("period", 20)
             vals = compute_sma(df, period)
-            results[f"SMA({period})"] = vals.round(5).tolist()
+            results[f"SMA({period})"] = _json_values(vals, 5)
 
         elif name == "ema":
             period = settings.get("period", 50)
             vals = compute_ema(df, period)
-            results[f"EMA({period})"] = vals.round(5).tolist()
+            results[f"EMA({period})"] = _json_values(vals, 5)
 
         elif name == "rsi":
             period = settings.get("period", 14)
             vals = compute_rsi(df, period)
-            results[f"RSI({period})"] = vals.round(2).tolist()
+            results[f"RSI({period})"] = _json_values(vals, 2)
 
         elif name == "macd":
             macd = compute_macd(
@@ -147,9 +155,9 @@ def compute_indicators(df, active_indicators):
                 settings.get("slow", 26),
                 settings.get("signal", 9)
             )
-            results["MACD"] = macd["macd"].round(5).tolist()
-            results["MACD_Signal"] = macd["signal"].round(5).tolist()
-            results["MACD_Hist"] = macd["histogram"].round(5).tolist()
+            results["MACD"] = _json_values(macd["macd"], 5)
+            results["MACD_Signal"] = _json_values(macd["signal"], 5)
+            results["MACD_Hist"] = _json_values(macd["histogram"], 5)
 
         elif name == "bollinger":
             bb = compute_bollinger(
@@ -157,8 +165,8 @@ def compute_indicators(df, active_indicators):
                 settings.get("period", 20),
                 settings.get("std_dev", 2.0)
             )
-            results["BB_Upper"] = bb["upper"].round(5).tolist()
-            results["BB_Middle"] = bb["middle"].round(5).tolist()
-            results["BB_Lower"] = bb["lower"].round(5).tolist()
+            results["BB_Upper"] = _json_values(bb["upper"], 5)
+            results["BB_Middle"] = _json_values(bb["middle"], 5)
+            results["BB_Lower"] = _json_values(bb["lower"], 5)
 
     return results

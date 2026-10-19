@@ -5,6 +5,7 @@
 # gunicorn. This is a minimal, safe change that doesn't alter behavior.
 import os
 import sys
+import math
 repo_root = os.path.dirname(os.path.abspath(__file__))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
@@ -46,7 +47,18 @@ def save_system(system):
     if system and system.session_id:
         store.set(system.session_id, system)
 
-def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=None):
+
+def as_utc_iso(value):
+    """Serialize provider timestamps as explicit UTC instead of ambiguous naive time."""
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return timestamp.isoformat().replace("+00:00", "Z")
+
+def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=None,
+                 initial_balance=None):
     """Initialize or re-initialize the replay and execution engines."""
     from backend.engine_system import EngineFactory
     
@@ -60,7 +72,10 @@ def init_engines(symbol="EURUSD", timeframe="H1", provider="csv", session_id=Non
     if provider not in allowed_providers:
         provider = "yfinance"
 
-    new_system = EngineFactory.create(symbol, timeframe, provider, session_id=session_id)
+    new_system = EngineFactory.create(
+        symbol, timeframe, provider, session_id=session_id,
+        initial_balance=initial_balance
+    )
     save_system(new_system)
     return new_system
 
@@ -70,7 +85,9 @@ def index():
     """Serve the main application page."""
     # Use yfinance/cache-backed symbols for the UI — hide CSV/MT5 choices
     symbols = data_module.get_available_symbols("yfinance")
-    return render_template("index.html", symbols=symbols)
+    return render_template(
+        "index.html", symbols=symbols, initial_balance=config.INITIAL_BALANCE
+    )
 
 
 # ── Data API ──────────────────────────────────────────────────
@@ -79,12 +96,34 @@ def api_load():
     """Load a symbol and timeframe into the replay engine."""
     data = request.get_json(force=True)
     symbol = data.get("symbol", "EURUSD")
+    if symbol not in config.SYMBOL_MAP:
+        return jsonify({"status": "error", "message": f"Unsupported symbol: {symbol}"}), 400
     timeframe = data.get("timeframe", "H1")
+    timeframe = str(timeframe).upper()
+    if timeframe not in {"M5", "M15", "H1", "H4", "D1"}:
+        return jsonify({
+            "status": "error",
+            "message": f"Unsupported timeframe: {timeframe}. Choose M5, M15, H1, H4, or D1."
+        }), 400
+    initial_balance = data.get("initial_balance")
+    if initial_balance is not None:
+        try:
+            initial_balance = float(initial_balance)
+            if not math.isfinite(initial_balance) or initial_balance <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "Balance must be a positive number."
+            }), 400
     provider = data.get("provider", "csv")
     session_id = data.get("session_id") # Explicit ID from frontend
 
     try:
-        system = init_engines(symbol, timeframe, provider, session_id=session_id)
+        system = init_engines(
+            symbol, timeframe, provider, session_id=session_id,
+            initial_balance=initial_balance
+        )
         return jsonify({
             "status": "ok",
             "symbol": symbol,
@@ -118,11 +157,17 @@ def api_data():
         save_system(system)
 
     current_price = float(bars.iloc[-1]["close"])
+    progress = system.replay_engine.get_progress()
+    progress["current_datetime"] = as_utc_iso(progress["current_datetime"])
+    latest_bar = system.replay_engine.data["datetime"].iloc[-1]
+
+    account = system.execution_engine.get_account_state(current_price)
+    save_system(system)
 
     return jsonify({
         "status": "ok",
         "bars": {
-            "datetime": bars["datetime"].astype(str).tolist(),
+            "datetime": [as_utc_iso(value) for value in bars["datetime"]],
             "open": bars["open"].tolist(),
             "high": bars["high"].tolist(),
             "low": bars["low"].tolist(),
@@ -130,9 +175,17 @@ def api_data():
             "volume": bars["volume"].tolist(),
         },
         "indicators": indicators_data,
-        "progress": system.replay_engine.get_progress(),
-        "account": system.execution_engine.get_account_state(current_price),
-        "open_positions": system.execution_engine.get_open_positions(),
+        "progress": progress,
+        "market_data": {
+            "latest_bar": as_utc_iso(latest_bar),
+            "checked_at": getattr(system, "source_checked_at", None),
+            "refresh_error": getattr(system, "source_refresh_error", None),
+            "provider": system.provider,
+            "symbol": system.symbol,
+            "timeframe": system.timeframe,
+        },
+        "account": account,
+        "open_positions": system.execution_engine.get_open_positions(current_price),
         "trade_history": system.execution_engine.get_trade_history(),
         "session_id": system.session_id
     })
@@ -144,6 +197,28 @@ def api_session():
     return jsonify({
         "status": "ok",
         "session_id": session.get("session_id")
+    })
+
+
+@app.route("/api/account/balance", methods=["POST"])
+def api_set_balance():
+    """Set the account's cash balance, preserving live positions and P&L."""
+    system = get_system()
+    if system is None:
+        return jsonify({"status": "error", "message": "No data loaded"}), 400
+
+    data = request.get_json(force=True)
+    try:
+        system.execution_engine.set_balance(data.get("balance"))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+    current_price = float(system.replay_engine.get_current_bar()["close"])
+    account = system.execution_engine.get_account_state(current_price)
+    save_system(system)
+    return jsonify({
+        "status": "ok",
+        "account": account,
     })
 
 
@@ -321,18 +396,28 @@ def api_trade():
         sl = data.get("sl")
         tp = data.get("tp")
 
-        if sl is not None:
-            sl = float(sl)
-        if tp is not None:
-            tp = float(tp)
+        try:
+            lot_size = float(lot_size)
+            sl = float(sl) if sl is not None else None
+            tp = float(tp) if tp is not None else None
+            if (not math.isfinite(lot_size) or lot_size <= 0 or
+                    (sl is not None and (not math.isfinite(sl) or sl <= 0)) or
+                    (tp is not None and (not math.isfinite(tp) or tp <= 0))):
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "Lot size must be positive, and stop loss/take profit must be positive prices."
+            }), 400
 
         result = system.execution_engine.open_position(
             direction=action,
-            lot_size=float(lot_size),
+            lot_size=lot_size,
             sl=sl,
             tp=tp,
             current_price=current_price,
             current_time=current_time,
+            symbol=system.symbol,
         )
         save_system(system)
         return jsonify({
@@ -366,10 +451,17 @@ def api_trade():
         position_id = data.get("position_id")
         sl = data.get("sl")
         tp = data.get("tp")
-        if sl is not None:
-            sl = float(sl)
-        if tp is not None:
-            tp = float(tp)
+        try:
+            sl = float(sl) if sl is not None else None
+            tp = float(tp) if tp is not None else None
+            if ((sl is not None and (not math.isfinite(sl) or sl <= 0)) or
+                    (tp is not None and (not math.isfinite(tp) or tp <= 0))):
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({
+                "status": "error",
+                "message": "Stop loss and take profit must be positive finite prices."
+            }), 400
         result = system.execution_engine.modify_position(position_id, sl=sl, tp=tp)
         save_system(system)
         return jsonify({
@@ -393,6 +485,34 @@ def api_indicators():
     name = data.get("name")
     settings = data.get("settings", {})
 
+    allowed_names = {"sma", "ema", "rsi", "macd", "bollinger"}
+    if action not in {"toggle", "set", "remove", "clear"}:
+        return jsonify({"status": "error", "message": "Unknown indicator action"}), 400
+    if action != "clear" and name not in allowed_names:
+        return jsonify({"status": "error", "message": "Unknown indicator"}), 400
+    if not isinstance(settings, dict):
+        return jsonify({"status": "error", "message": "Indicator settings must be an object"}), 400
+    try:
+        if name in {"sma", "ema", "rsi", "bollinger"}:
+            period = int(settings.get("period", 20))
+            if period < 2 or period > 500:
+                raise ValueError
+            settings["period"] = period
+        if name == "macd":
+            fast = int(settings.get("fast", 12))
+            slow = int(settings.get("slow", 26))
+            signal = int(settings.get("signal", 9))
+            if fast < 2 or slow <= fast or signal < 1 or slow > 500 or signal > 500:
+                raise ValueError
+            settings.update(fast=fast, slow=slow, signal=signal)
+        if name == "bollinger":
+            std_dev = float(settings.get("std_dev", 2.0))
+            if not math.isfinite(std_dev) or std_dev <= 0 or std_dev > 10:
+                raise ValueError
+            settings["std_dev"] = std_dev
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid indicator parameters"}), 400
+
     if action == "toggle":
         if name in system.active_indicators:
             del system.active_indicators[name]
@@ -405,7 +525,10 @@ def api_indicators():
     elif action == "clear":
         system.active_indicators = {}
     
-    system.refresh_indicators()
+    try:
+        system.refresh_indicators()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Could not compute indicators: {e}"}), 400
     save_system(system)
 
     return jsonify({
